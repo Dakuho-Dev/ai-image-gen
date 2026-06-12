@@ -14,7 +14,7 @@ const QUALITIES = [
   { value: 'high', label: 'Cao (chậm)' },
 ]
 
-export default function Composer({ onSend, disabled, attachments, setAttachments }) {
+export default function Composer({ onSend, onStop, disabled, attachments, setAttachments }) {
   const [prompt, setPrompt] = useState('')
   const [count, setCount] = useState(1)
   const [size, setSize] = useState('auto')
@@ -157,14 +157,24 @@ export default function Composer({ onSend, disabled, attachments, setAttachments
             </label>
           </div>
 
-          <button
-            className="send-btn"
-            onClick={handleSubmit}
-            disabled={disabled || !prompt.trim()}
-            title="Tạo ảnh"
-          >
-            ↑
-          </button>
+          {disabled && onStop ? (
+            <button
+              className="send-btn stop"
+              onClick={onStop}
+              title="Dừng tạo ảnh"
+            >
+              ■
+            </button>
+          ) : (
+            <button
+              className="send-btn"
+              onClick={handleSubmit}
+              disabled={disabled || !prompt.trim()}
+              title="Tạo ảnh"
+            >
+              ↑
+            </button>
+          )}
         </div>
       </div>
     </div>

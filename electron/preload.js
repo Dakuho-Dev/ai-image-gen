@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
   generateImages: (payload) => ipcRenderer.invoke('image:generate', payload),
+  cancelGeneration: (requestId) => ipcRenderer.invoke('image:cancel', requestId),
   onImageProgress: (callback) => {
     const listener = (_event, data) => callback(data)
     ipcRenderer.on('image:generate:progress', listener)
@@ -11,6 +12,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   saveImage: (payload) => ipcRenderer.invoke('image:save', payload),
   readImage: (id) => ipcRenderer.invoke('image:read', id),
+  getImagesFolder: () => ipcRenderer.invoke('images:getFolder'),
+  openImagesFolder: () => ipcRenderer.invoke('images:openFolder'),
+  chooseImagesFolder: () => ipcRenderer.invoke('images:chooseFolder'),
   // Conversation (tab) management
   listConversations: () => ipcRenderer.invoke('conversations:list'),
   createConversation: () => ipcRenderer.invoke('conversations:create'),

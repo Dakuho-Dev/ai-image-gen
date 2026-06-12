@@ -5,9 +5,8 @@ export default function SettingsModal({ onSave, onClose, dismissible }) {
   const [baseURL, setBaseURL] = useState('')
   const [model, setModel] = useState('gpt-image-1')
   const [customInstructions, setCustomInstructions] = useState('')
-  const [version, setVersion] = useState('')
-  // Update flow: { status, version?, percent?, message? }
-  const [update, setUpdate] = useState({ status: 'idle' })
+  const [imagesFolder, setImagesFolder] = useState('')
+  const [folderMsg, setFolderMsg] = useState('')
 
   useEffect(() => {
     window.api.getSettings().then((settings) => {
@@ -16,36 +15,19 @@ export default function SettingsModal({ onSave, onClose, dismissible }) {
       setModel(settings.model || 'gpt-image-1')
       setCustomInstructions(settings.customInstructions || '')
     })
-    window.api.getAppVersion().then(setVersion)
+    window.api.getImagesFolder().then(setImagesFolder)
   }, [])
 
-  // Subscribe to live update status pushed from the main process.
-  useEffect(() => {
-    return window.api.onUpdateStatus((data) => setUpdate(data))
-  }, [])
-
-  async function handleCheck() {
-    setUpdate({ status: 'checking' })
-    const res = await window.api.checkForUpdate()
-    if (!res.ok) {
-      setUpdate({
-        status: 'error',
-        message:
-          res.reason === 'dev'
-            ? 'Tính năng cập nhật chỉ hoạt động ở bản đã cài đặt.'
-            : res.reason,
-      })
+  async function handleChooseFolder() {
+    const res = await window.api.chooseImagesFolder()
+    if (res?.success) {
+      setImagesFolder(res.path)
+      setFolderMsg(
+        res.moved > 0
+          ? `Đã đổi thư mục và chuyển ${res.moved} ảnh sang vị trí mới.`
+          : 'Đã đổi thư mục lưu ảnh.'
+      )
     }
-  }
-
-  async function handleDownload() {
-    setUpdate({ status: 'downloading', percent: 0 })
-    const res = await window.api.downloadUpdate()
-    if (!res.ok) setUpdate({ status: 'error', message: res.reason })
-  }
-
-  function handleInstall() {
-    window.api.installUpdate()
   }
 
   function handleSubmit(e) {
@@ -131,44 +113,28 @@ export default function SettingsModal({ onSave, onClose, dismissible }) {
           </div>
         </form>
 
-        <div className="update-section">
-          <div className="update-row">
-            <span className="update-version">Phiên bản {version || '—'}</span>
-            {!['checking', 'downloading', 'downloaded', 'available'].includes(update.status) && (
-              <button type="button" className="btn secondary" onClick={handleCheck}>
-                Kiểm tra cập nhật
-              </button>
-            )}
-            {update.status === 'available' && (
-              <button type="button" className="btn primary" onClick={handleDownload}>
-                ⬇ Tải bản {update.version}
-              </button>
-            )}
-            {update.status === 'downloaded' && (
-              <button type="button" className="btn primary" onClick={handleInstall}>
-                ↻ Khởi động lại để cập nhật
-              </button>
-            )}
+        <div className="storage-section">
+          <label>Thư mục lưu ảnh</label>
+          <div className="folder-path" title={imagesFolder}>
+            {imagesFolder || '—'}
           </div>
-
-          {update.status === 'checking' && <p className="hint">Đang kiểm tra cập nhật…</p>}
-          {update.status === 'not-available' && (
-            <p className="hint">Bạn đang dùng phiên bản mới nhất.</p>
-          )}
-          {update.status === 'available' && (
-            <p className="hint">Đã có bản mới {update.version}. Nhấn để tải về.</p>
-          )}
-          {update.status === 'downloading' && (
-            <p className="hint">Đang tải bản cập nhật… {update.percent ?? 0}%</p>
-          )}
-          {update.status === 'downloaded' && (
-            <p className="hint">Đã tải xong. Khởi động lại để áp dụng bản {update.version}.</p>
-          )}
-          {update.status === 'error' && (
-            <p className="hint" style={{ color: '#ff9d9d' }}>
-              {update.message}
-            </p>
-          )}
+          <div className="folder-actions">
+            <button type="button" className="btn secondary" onClick={handleChooseFolder}>
+              📂 Chọn thư mục…
+            </button>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => window.api.openImagesFolder()}
+            >
+              📁 Mở thư mục
+            </button>
+          </div>
+          {folderMsg && <p className="hint">{folderMsg}</p>}
+          <p className="hint">
+            Tất cả ảnh được tạo ra đều lưu trong thư mục này. Khi đổi thư mục, các ảnh đã tạo sẽ
+            được tự động chuyển sang vị trí mới.
+          </p>
         </div>
       </div>
     </div>

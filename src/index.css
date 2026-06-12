@@ -436,6 +436,17 @@ body {
   animation: img-spin 0.8s linear infinite;
 }
 
+.tab-spinner {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  margin-right: 6px;
+  border: 2px solid #3a3b44;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: img-spin 0.8s linear infinite;
+}
+
 /* ---- Composer ---- */
 .composer {
   padding: 12px 20px 22px;
@@ -604,6 +615,16 @@ body {
   cursor: not-allowed;
 }
 
+.send-btn.stop {
+  background: #d9534f;
+  font-size: 15px;
+}
+
+.send-btn.stop:hover {
+  background: #c9302c;
+  transform: translateY(-1px);
+}
+
 /* ---- Buttons (modals/lightbox) ---- */
 .btn {
   border: none;
@@ -743,23 +764,166 @@ body {
   margin-top: 18px;
 }
 
-.update-section {
+.storage-section {
   margin-top: 18px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
 }
 
-.update-row {
+.folder-path {
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  word-break: break-all;
+}
+
+.folder-actions {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
-.update-version {
-  font-size: 13px;
+/* ---- Update widget (bottom-left, floating) ---- */
+.update-widget {
+  position: fixed;
+  left: 14px;
+  bottom: 12px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  pointer-events: none;
+}
+
+.update-widget > * {
+  pointer-events: auto;
+}
+
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  font-size: 12px;
   color: var(--text-dim);
-  margin-right: auto;
+  background: rgba(26, 27, 31, 0.85);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.update-pill:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.update-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  transition: background 0.15s ease;
+}
+
+.update-pill.has-update {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.update-pill.has-update .update-pill-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(16, 163, 127, 0.6);
+  animation: update-pulse 1.8s ease-out infinite;
+}
+
+@keyframes update-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 163, 127, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(16, 163, 127, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 163, 127, 0);
+  }
+}
+
+.update-card {
+  position: relative;
+  width: 250px;
+  padding: 14px 14px 13px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  animation: popIn 0.18s ease;
+}
+
+.update-card-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.update-card-close:hover {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+
+.update-card-title {
+  margin: 0 18px 6px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.update-card-text {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.update-card-text.error {
+  color: #ff9d9d;
+}
+
+.update-card-text:last-child {
+  margin-bottom: 0;
+}
+
+.update-card-btn {
+  width: 100%;
+}
+
+.update-progress {
+  height: 6px;
+  margin: 8px 0;
+  background: var(--bg-elev-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.update-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.2s ease;
 }
 
 /* ---- Animations ---- */

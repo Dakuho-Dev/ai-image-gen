@@ -4,6 +4,7 @@ import ChatMessage from './components/ChatMessage.jsx'
 import Composer from './components/Composer.jsx'
 import Lightbox from './components/Lightbox.jsx'
 import ConversationTabs from './components/ConversationTabs.jsx'
+import UpdateWidget from './components/UpdateWidget.jsx'
 
 // Stored images are served from disk via the media:// protocol (see electron/main.js).
 const mediaUrl = (id) => `media://img/${id}`
@@ -31,14 +32,18 @@ export default function App() {
   const [convMessages, setConvMessages] = useState({})
   const [isSettingsOpen, setSettingsOpen] = useState(false)
   const [hasApiKey, setHasApiKey] = useState(true)
-  const [isLoading, setIsLoading] = useState(false)
+  // Conversations with a generation in flight. Per-conversation so other tabs
+  // stay usable while one is busy — letting several generate concurrently.
+  const [generatingIds, setGeneratingIds] = useState(() => new Set())
   const [attachments, setAttachments] = useState([])
   const [lightbox, setLightbox] = useState(null)
   const scrollRef = useRef(null)
-  // The generation currently in flight: which conversation + assistant slot it fills.
-  const inFlight = useRef(null)
+  // In-flight generations keyed by requestId -> { convId, assistantId }, so
+  // streamed frames from concurrent requests reach the right message slot.
+  const inFlight = useRef(new Map())
 
   const messages = convMessages[activeId] || []
+  const isActiveGenerating = generatingIds.has(activeId)
 
   useEffect(() => {
     window.api.getSettings().then((settings) => {
@@ -76,8 +81,8 @@ export default function App() {
   // Live partial/final frames for the in-flight generation: fill slots as they
   // stream in, targeting the conversation that owns the request.
   useEffect(() => {
-    return window.api.onImageProgress(({ index, b64 }) => {
-      const f = inFlight.current
+    return window.api.onImageProgress(({ requestId, index, b64 }) => {
+      const f = inFlight.current.get(requestId)
       if (!f) return
       const src = `data:image/png;base64,${b64}`
       setConvMessages((prev) => {
@@ -98,12 +103,13 @@ export default function App() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [messages, isLoading])
+  }, [messages, isActiveGenerating])
 
   async function handleSend({ prompt, images, count, size, quality }) {
     const convId = activeId
     const userId = crypto.randomUUID()
     const assistantId = crypto.randomUUID()
+    const requestId = crypto.randomUUID()
     const userMessage = {
       id: userId,
       role: 'user',
@@ -120,7 +126,7 @@ export default function App() {
     }
 
     // Placeholder assistant message with empty slots that fill in as images stream.
-    inFlight.current = { convId, assistantId }
+    inFlight.current.set(requestId, { convId, assistantId })
     setConvMessages((prev) => ({
       ...prev,
       [convId]: [
@@ -129,7 +135,7 @@ export default function App() {
         { id: assistantId, role: 'assistant', images: Array(count).fill(null), pending: true },
       ],
     }))
-    setIsLoading(true)
+    setGeneratingIds((prev) => new Set(prev).add(convId))
 
     const result = await window.api.generateImages({
       prompt,
@@ -137,10 +143,15 @@ export default function App() {
       size,
       quality,
       referenceImages: images,
+      requestId,
     })
 
-    setIsLoading(false)
-    inFlight.current = null
+    inFlight.current.delete(requestId)
+    setGeneratingIds((prev) => {
+      const next = new Set(prev)
+      next.delete(convId)
+      return next
+    })
 
     setConvMessages((prev) => {
       const next = (prev[convId] || []).map((m) => {
@@ -152,6 +163,9 @@ export default function App() {
               images: result.imageIds.map(mediaUrl),
               imageIds: result.imageIds,
             }
+          }
+          if (result.canceled) {
+            return { id: assistantId, role: 'error', text: 'Đã dừng tạo ảnh.' }
           }
           return { id: assistantId, role: 'error', text: result.error }
         }
@@ -168,6 +182,14 @@ export default function App() {
       window.api.saveConversation({ id: convId, messages: toPersisted(next) })
       return { ...prev, [convId]: next }
     })
+  }
+
+  // Stop the active conversation's in-flight generation. The generate promise
+  // then resolves (canceled), and handleSend's continuation cleans up state.
+  function handleStop() {
+    for (const [reqId, f] of inFlight.current) {
+      if (f.convId === activeId) window.api.cancelGeneration(reqId)
+    }
   }
 
   function handleSelectTab(id) {
@@ -250,6 +272,7 @@ export default function App() {
       <ConversationTabs
         conversations={conversations}
         activeId={activeId}
+        generatingIds={generatingIds}
         onSelect={handleSelectTab}
         onNew={handleNewTab}
         onClose={handleCloseTab}
@@ -273,7 +296,8 @@ export default function App() {
 
       <Composer
         onSend={handleSend}
-        disabled={isLoading}
+        onStop={handleStop}
+        disabled={isActiveGenerating}
         attachments={attachments}
         setAttachments={setAttachments}
       />
@@ -294,6 +318,8 @@ export default function App() {
           dismissible={hasApiKey}
         />
       )}
+
+      <UpdateWidget />
     </div>
   )
 }

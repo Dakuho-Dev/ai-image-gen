@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
@@ -15,7 +15,7 @@ process.env.VITE_PUBLIC = app.isPackaged
   : path.join(process.env.DIST, '../public')
 
 const configPath = path.join(app.getPath('userData'), 'config.json')
-const imagesDir = path.join(app.getPath('userData'), 'images')
+const defaultImagesDir = path.join(app.getPath('userData'), 'images')
 const historyPath = path.join(app.getPath('userData'), 'history.json')
 // Multi-conversation storage: an index file with tab metadata + the active tab,
 // plus one messages file per conversation under conversations/.
@@ -59,16 +59,23 @@ const store = {
 }
 
 // ---- Persistent image + chat history storage ----
+// The folder where generated images live is user-configurable (defaults to
+// userData/images). Read it fresh each time so a change takes effect at once.
+function getImagesDir() {
+  return store.get('imagesDir', defaultImagesDir) || defaultImagesDir
+}
+
 function saveImageFile(b64) {
-  fs.mkdirSync(imagesDir, { recursive: true })
+  const dir = getImagesDir()
+  fs.mkdirSync(dir, { recursive: true })
   const id = `${randomUUID()}.png`
-  fs.writeFileSync(path.join(imagesDir, id), Buffer.from(b64, 'base64'))
+  fs.writeFileSync(path.join(dir, id), Buffer.from(b64, 'base64'))
   return id
 }
 
 function imagePath(id) {
   // basename guards against path traversal from a crafted id.
-  return path.join(imagesDir, path.basename(id))
+  return path.join(getImagesDir(), path.basename(id))
 }
 
 // ---- Multi-conversation storage ----
@@ -325,7 +332,7 @@ async function consumeImageStream(res, { index, emit }) {
 
 // Generate a single image into `index`, attempting true partial-image
 // streaming and falling back gracefully when the provider doesn't support it.
-async function generateOneSlot({ index, prompt, model, size, quality, imageFiles, apiKey, emit }) {
+async function generateOneSlot({ index, prompt, model, size, quality, imageFiles, apiKey, emit, signal }) {
   const base = endpointBase()
 
   async function request({ stream }) {
@@ -362,7 +369,7 @@ async function generateOneSlot({ index, prompt, model, size, quality, imageFiles
         body: JSON.stringify(body),
       }
     }
-    return fetchWithDuplex(url, init)
+    return fetchWithDuplex(url, { ...init, signal })
   }
 
   let res = await request({ stream: true })
@@ -389,7 +396,7 @@ async function generateOneSlot({ index, prompt, model, size, quality, imageFiles
   const item = json?.data?.[0]
   let b64 = item?.b64_json
   if (!b64 && item?.url) {
-    const imgRes = await fetch(item.url)
+    const imgRes = await fetch(item.url, { signal })
     b64 = Buffer.from(await imgRes.arrayBuffer()).toString('base64')
   }
   if (!b64) throw new Error('Phản hồi không chứa dữ liệu ảnh hợp lệ.')
@@ -397,7 +404,16 @@ async function generateOneSlot({ index, prompt, model, size, quality, imageFiles
   return b64
 }
 
-ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, referenceImages }) => {
+// In-flight generations keyed by requestId, so a stop request can abort the
+// matching network calls without touching other concurrent conversations.
+const activeGenerations = new Map()
+
+ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, referenceImages, requestId }) => {
+  // Tag every progress frame with the request id so the renderer can route
+  // partial images to the right conversation when several run concurrently.
+  const emit = (payload) => emitProgress({ ...payload, requestId })
+  const controller = new AbortController()
+  if (requestId) activeGenerations.set(requestId, controller)
   try {
     const apiKey = store.get('apiKey', '')
     if (!apiKey) {
@@ -432,7 +448,8 @@ ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, refe
           quality,
           imageFiles,
           apiKey,
-          emit: emitProgress,
+          emit,
+          signal: controller.signal,
         })
       )
     )
@@ -441,22 +458,39 @@ ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, refe
       .filter((r) => r.status === 'fulfilled')
       .map((r) => r.value)
 
+    // Persist any image that finished before a stop (don't waste paid results).
+    const imageIds = images.map(saveImageFile)
+    const canceled = controller.signal.aborted
+
     if (images.length === 0) {
+      if (canceled) return { success: false, canceled: true }
       const firstErr = results.find((r) => r.status === 'rejected')
       throw firstErr ? firstErr.reason : new Error('Không tạo được ảnh nào.')
     }
 
-    // Persist result and reference images to disk so they survive restarts.
-    const imageIds = images.map(saveImageFile)
+    // Reference images persist so they survive restarts.
     const referenceImageIds = referenceImages
       ? referenceImages.map((img) => saveImageFile(img.data))
       : []
 
-    return { success: true, imageIds, referenceImageIds }
+    return { success: true, imageIds, referenceImageIds, canceled }
   } catch (err) {
     console.error(err)
     return { success: false, error: err.message || String(err) }
+  } finally {
+    if (requestId) activeGenerations.delete(requestId)
   }
+})
+
+// Stop an in-flight generation: abort its network calls. Any images already
+// completed are still returned by the generate handler above.
+ipcMain.handle('image:cancel', (_event, requestId) => {
+  const controller = activeGenerations.get(requestId)
+  if (controller) {
+    controller.abort()
+    return true
+  }
+  return false
 })
 
 // ---- Conversation (tab) management ----
@@ -557,4 +591,57 @@ ipcMain.handle('image:save', async (_event, { id, defaultName }) => {
 
   fs.copyFileSync(imagePath(id), result.filePath)
   return { success: true, path: result.filePath }
+})
+
+// ---- Image storage folder: inspect, open, and relocate ----
+ipcMain.handle('images:getFolder', () => getImagesDir())
+
+// Open the folder that stores all generated images in the OS file manager.
+ipcMain.handle('images:openFolder', async () => {
+  const dir = getImagesDir()
+  fs.mkdirSync(dir, { recursive: true })
+  const err = await shell.openPath(dir)
+  return { success: !err, path: dir, error: err || undefined }
+})
+
+// Let the user pick a new storage folder, move existing images into it, then
+// remember the choice. Image ids are bare filenames, so nothing else changes.
+ipcMain.handle('images:chooseFolder', async () => {
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Chọn thư mục lưu ảnh',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (result.canceled || !result.filePaths?.[0]) return { success: false }
+
+  const target = result.filePaths[0]
+  const current = getImagesDir()
+  if (path.resolve(target) === path.resolve(current)) {
+    return { success: true, path: current, moved: 0 }
+  }
+
+  fs.mkdirSync(target, { recursive: true })
+  let moved = 0
+  try {
+    for (const name of fs.readdirSync(current)) {
+      const from = path.join(current, name)
+      const to = path.join(target, name)
+      try {
+        if (!fs.statSync(from).isFile()) continue
+        try {
+          fs.renameSync(from, to) // fast path, same volume
+        } catch {
+          fs.copyFileSync(from, to) // cross-volume fallback
+          fs.rmSync(from)
+        }
+        moved++
+      } catch {
+        // skip a file we couldn't move; keep going
+      }
+    }
+  } catch {
+    // current folder may not exist yet — nothing to move
+  }
+
+  store.set('imagesDir', target)
+  return { success: true, path: target, moved }
 })

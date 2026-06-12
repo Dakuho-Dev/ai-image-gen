@@ -5,6 +5,7 @@ import React, { useEffect, useRef, useState } from 'react'
 export default function ConversationTabs({
   conversations,
   activeId,
+  generatingIds,
   onSelect,
   onNew,
   onClose,
@@ -68,6 +69,9 @@ export default function ConversationTabs({
                 />
               ) : (
                 <>
+                  {generatingIds?.has(conv.id) && (
+                    <span className="tab-spinner" title="Đang tạo ảnh…" />
+                  )}
                   <span className="tab-title">{conv.title}</span>
                   <button
                     className="tab-rename"
