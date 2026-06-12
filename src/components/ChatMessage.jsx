@@ -1,0 +1,64 @@
+import React from 'react'
+
+// The app ships with the default Electron icon (the orbital "atom" mark), so the
+// assistant avatar reuses that logo to stay consistent with the app icon.
+function ElectronIcon() {
+  return (
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <circle cx="50" cy="50" r="50" fill="#9FEAF9" />
+      <g fill="none" stroke="#2B2E3B" strokeWidth="5">
+        <ellipse cx="50" cy="50" rx="44" ry="17" />
+        <ellipse cx="50" cy="50" rx="44" ry="17" transform="rotate(60 50 50)" />
+        <ellipse cx="50" cy="50" rx="44" ry="17" transform="rotate(120 50 50)" />
+      </g>
+      <circle cx="50" cy="50" r="8" fill="#2B2E3B" />
+    </svg>
+  )
+}
+
+export default function ChatMessage({ message, onImageClick }) {
+  const { role } = message
+  const isUser = role === 'user'
+
+  return (
+    <div className={`msg-row ${role}`}>
+      <div className={`avatar ${isUser ? 'user' : 'assistant'}`}>
+        {isUser ? '🧑' : <ElectronIcon />}
+      </div>
+      <div className="msg-body">
+        <span className="msg-name">{isUser ? 'Bạn' : 'DakuhoAI'}</span>
+        {role === 'error' ? (
+          <div className="bubble error">{message.text}</div>
+        ) : (
+          <div className="msg-content">
+            {message.text && (
+              <div className="bubble">
+                <p className="bubble-text">{message.text}</p>
+              </div>
+            )}
+            {message.images && message.images.length > 0 && (
+              <div className="image-grid">
+                {message.images.map((src, idx) =>
+                  src ? (
+                    <div className="image-item" key={idx}>
+                      <img
+                        src={src}
+                        alt={`result-${idx}`}
+                        loading="lazy"
+                        onClick={() => onImageClick(src, message.imageIds?.[idx])}
+                      />
+                    </div>
+                  ) : (
+                    <div className="image-item placeholder" key={idx}>
+                      <div className="img-spinner" />
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
