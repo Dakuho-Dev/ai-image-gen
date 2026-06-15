@@ -17,12 +17,17 @@ contextBridge.exposeInMainWorld('api', {
   chooseImagesFolder: () => ipcRenderer.invoke('images:chooseFolder'),
   // Conversation (tab) management
   listConversations: () => ipcRenderer.invoke('conversations:list'),
-  createConversation: () => ipcRenderer.invoke('conversations:create'),
+  createConversation: (payload) => ipcRenderer.invoke('conversations:create', payload),
   renameConversation: (payload) => ipcRenderer.invoke('conversations:rename', payload),
   setActiveConversation: (id) => ipcRenderer.invoke('conversations:setActive', id),
   deleteConversation: (id) => ipcRenderer.invoke('conversations:delete', id),
   getConversation: (id) => ipcRenderer.invoke('conversation:get', id),
   saveConversation: (payload) => ipcRenderer.invoke('conversation:save', payload),
+  // Bot management
+  listBots: () => ipcRenderer.invoke('bots:list'),
+  createBot: (payload) => ipcRenderer.invoke('bots:create', payload),
+  updateBot: (payload) => ipcRenderer.invoke('bots:update', payload),
+  deleteBot: (id) => ipcRenderer.invoke('bots:delete', id),
   // Auto update
   getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
   checkForUpdate: () => ipcRenderer.invoke('update:check'),

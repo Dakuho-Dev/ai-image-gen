@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 
 // The app ships with the default Electron icon (the orbital "atom" mark), so the
 // assistant avatar reuses that logo to stay consistent with the app icon.
@@ -16,9 +16,36 @@ function ElectronIcon() {
   )
 }
 
-export default function ChatMessage({ message, onImageClick }) {
+export default function ChatMessage({ message, onImageClick, onEdit, editDisabled }) {
   const { role } = message
   const isUser = role === 'user'
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(message.text || '')
+  const canEdit = isUser && onEdit && message.text
+
+  function startEdit() {
+    setDraft(message.text || '')
+    setEditing(true)
+  }
+
+  function saveEdit() {
+    const trimmed = draft.trim()
+    if (!trimmed || trimmed === message.text) {
+      setEditing(false)
+      return
+    }
+    onEdit(message.id, trimmed)
+    setEditing(false)
+  }
+
+  function handleEditKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      saveEdit()
+    } else if (e.key === 'Escape') {
+      setEditing(false)
+    }
+  }
 
   return (
     <div className={`msg-row ${role}`}>
@@ -31,10 +58,41 @@ export default function ChatMessage({ message, onImageClick }) {
           <div className="bubble error">{message.text}</div>
         ) : (
           <div className="msg-content">
-            {message.text && (
-              <div className="bubble">
-                <p className="bubble-text">{message.text}</p>
+            {editing ? (
+              <div className="bubble edit-bubble">
+                <textarea
+                  className="edit-textarea"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={handleEditKeyDown}
+                  autoFocus
+                  rows={2}
+                />
+                <div className="edit-actions">
+                  <button className="edit-cancel" onClick={() => setEditing(false)}>
+                    Hủy
+                  </button>
+                  <button className="edit-save" onClick={saveEdit}>
+                    Lưu &amp; tạo lại
+                  </button>
+                </div>
               </div>
+            ) : (
+              message.text && (
+                <div className="bubble">
+                  <p className="bubble-text">{message.text}</p>
+                  {canEdit && (
+                    <button
+                      className="edit-btn"
+                      onClick={startEdit}
+                      disabled={editDisabled}
+                      title={editDisabled ? 'Đang tạo ảnh...' : 'Sửa và tạo lại'}
+                    >
+                      ✏️ Sửa
+                    </button>
+                  )}
+                </div>
+              )
             )}
             {message.images && message.images.length > 0 && (
               <div className="image-grid">

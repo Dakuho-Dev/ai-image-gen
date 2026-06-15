@@ -163,7 +163,7 @@ export default function Composer({ onSend, onStop, disabled, attachments, setAtt
               onClick={onStop}
               title="Dừng tạo ảnh"
             >
-              ■
+              <span className="stop-icon" />
             </button>
           ) : (
             <button

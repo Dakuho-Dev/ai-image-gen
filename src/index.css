@@ -50,6 +50,200 @@ body {
   height: 100vh;
 }
 
+/* ---- Body: sidebar + main column ---- */
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.main-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ---- Sidebar ---- */
+.sidebar {
+  flex: 0 0 240px;
+  width: 240px;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  transition: flex-basis 0.18s ease, width 0.18s ease;
+}
+
+.sidebar.collapsed {
+  flex-basis: 36px;
+  width: 36px;
+}
+
+.sidebar-toggle {
+  align-self: flex-end;
+  margin: 8px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.sidebar-toggle:hover {
+  background: var(--border-strong);
+  color: var(--text);
+}
+
+.sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 12px;
+}
+
+.section-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.section-header:hover {
+  background: var(--bg-elev-2);
+}
+
+.section-caret {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.section-caret.open {
+  transform: rotate(90deg);
+}
+
+.section-title {
+  flex: 1;
+  text-align: left;
+}
+
+.section-add {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 16px;
+}
+.section-add:hover {
+  background: var(--border-strong);
+  color: var(--text);
+}
+
+.section-body {
+  padding: 2px 0 2px 6px;
+}
+
+.section-empty {
+  margin: 6px 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.bot-item {
+  display: flex;
+  align-items: center;
+  border-radius: 8px;
+}
+.bot-item:hover {
+  background: var(--bg-elev-2);
+}
+
+.bot-name {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  padding: 7px 8px;
+  cursor: pointer;
+  border-radius: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bot-actions {
+  display: none;
+  gap: 2px;
+  padding-right: 4px;
+}
+.bot-item:hover .bot-actions {
+  display: flex;
+}
+
+.bot-action {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px;
+  border-radius: 6px;
+  opacity: 0.8;
+}
+.bot-action:hover {
+  background: var(--border-strong);
+  opacity: 1;
+}
+
+/* ---- Sidebar footer (settings + version) ---- */
+.sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-settings {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.sidebar-settings:hover {
+  background: var(--bg-elev-2);
+}
+
+/* The version/update widget now lives in the sidebar footer, not floating. */
+.sidebar-footer .update-card {
+  width: 100%;
+}
+
 /* ---- Top bar ---- */
 .topbar {
   display: flex;
@@ -374,6 +568,88 @@ body {
   word-break: break-word;
 }
 
+/* ---- Edit / regenerate a prompt ---- */
+.edit-btn {
+  margin-top: 8px;
+  padding: 3px 9px;
+  font-size: 12px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.edit-btn:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.edit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.edit-bubble {
+  background: var(--user-bubble);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 280px;
+}
+
+.edit-textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  color: #fff;
+  padding: 8px 10px;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.edit-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.edit-cancel,
+.edit-save {
+  padding: 5px 12px;
+  font-size: 13px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.edit-cancel {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.edit-cancel:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.edit-save {
+  background: var(--accent);
+  color: #fff;
+}
+
+.edit-save:hover {
+  background: var(--accent-hover);
+}
+
 /* ---- Image grid ---- */
 .image-grid {
   display: grid;
@@ -617,7 +893,14 @@ body {
 
 .send-btn.stop {
   background: #d9534f;
-  font-size: 15px;
+}
+
+/* A real centered square — avoids the baseline offset a ■ glyph leaves. */
+.stop-icon {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: #fff;
 }
 
 .send-btn.stop:hover {
@@ -789,15 +1072,11 @@ body {
 
 /* ---- Update widget (bottom-left, floating) ---- */
 .update-widget {
-  position: fixed;
-  left: 14px;
-  bottom: 12px;
-  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  align-items: flex-start;
-  pointer-events: none;
+  align-items: stretch;
+  width: 100%;
 }
 
 .update-widget > * {

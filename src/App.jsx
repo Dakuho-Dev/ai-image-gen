@@ -4,16 +4,27 @@ import ChatMessage from './components/ChatMessage.jsx'
 import Composer from './components/Composer.jsx'
 import Lightbox from './components/Lightbox.jsx'
 import ConversationTabs from './components/ConversationTabs.jsx'
-import UpdateWidget from './components/UpdateWidget.jsx'
+import Sidebar from './components/Sidebar.jsx'
+import BotModal from './components/BotModal.jsx'
 
 // Stored images are served from disk via the media:// protocol (see electron/main.js).
 const mediaUrl = (id) => `media://img/${id}`
 
 // Strip transient/in-memory fields (data URLs, pending flags) before persisting.
+// Generation params (count/size/quality) are kept on user messages so a turn
+// can later be edited and regenerated with the same settings.
 function toPersisted(messages) {
   return messages
     .filter((m) => !m.pending)
-    .map((m) => ({ id: m.id, role: m.role, text: m.text, imageIds: m.imageIds }))
+    .map((m) => ({
+      id: m.id,
+      role: m.role,
+      text: m.text,
+      imageIds: m.imageIds,
+      count: m.count,
+      size: m.size,
+      quality: m.quality,
+    }))
 }
 
 // Rehydrate a conversation loaded from disk: rebuild displayable image URLs
@@ -25,6 +36,28 @@ function fromPersisted(items) {
   }))
 }
 
+// How many prior user prompts to carry forward as context. The Images API is
+// stateless, so to make follow-ups like "do the same with these images" work we
+// prepend the recent text instructions ourselves. Capped to keep the prompt
+// focused (too much history degrades image quality).
+const CONTEXT_PROMPTS = 6
+
+// Build the prompt actually sent to the API: the prior user instructions in
+// this conversation followed by the current one. Returns the raw prompt
+// unchanged when there's no prior context.
+function buildContextPrompt(priorMessages, currentPrompt) {
+  const priorPrompts = (priorMessages || [])
+    .filter((m) => m.role === 'user' && m.text && m.text.trim())
+    .map((m) => m.text.trim())
+    .slice(-CONTEXT_PROMPTS)
+  if (priorPrompts.length === 0) return currentPrompt
+  const context = priorPrompts.map((p, i) => `${i + 1}. ${p}`).join('\n')
+  return (
+    `Bối cảnh các yêu cầu trước đó trong cuộc trò chuyện (để hiểu các tham chiếu như "làm tương tự", "như trên"):\n${context}\n\n` +
+    `Yêu cầu hiện tại: ${currentPrompt}`
+  )
+}
+
 export default function App() {
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
@@ -32,6 +65,11 @@ export default function App() {
   const [convMessages, setConvMessages] = useState({})
   const [isSettingsOpen, setSettingsOpen] = useState(false)
   const [hasApiKey, setHasApiKey] = useState(true)
+  // User-defined bots and the sidebar that lists them. `botModal` holds the
+  // bot being created/edited (null when closed; {} when creating).
+  const [bots, setBots] = useState([])
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [botModal, setBotModal] = useState(null)
   // Conversations with a generation in flight. Per-conversation so other tabs
   // stay usable while one is busy — letting several generate concurrently.
   const [generatingIds, setGeneratingIds] = useState(() => new Set())
@@ -61,6 +99,7 @@ export default function App() {
       setActiveId(idx.activeId)
       loadConversation(idx.activeId)
     })
+    window.api.listBots().then(setBots)
   }, [])
 
   // Fetch a conversation's messages from disk the first time it's opened.
@@ -105,44 +144,32 @@ export default function App() {
     }
   }, [messages, isActiveGenerating])
 
-  async function handleSend({ prompt, images, count, size, quality }) {
-    const convId = activeId
-    const userId = crypto.randomUUID()
-    const assistantId = crypto.randomUUID()
+  // The instructions appended to a conversation's prompts: a bot conversation
+  // uses the bot's own instructions; everything else falls back to the global
+  // setting (signalled by returning undefined).
+  function effectiveInstructions(convId) {
+    const conv = conversations.find((c) => c.id === convId)
+    if (!conv?.botId) return undefined
+    const bot = bots.find((b) => b.id === conv.botId)
+    return bot ? bot.instructions || '' : undefined
+  }
+
+  // Shared generation core for both a fresh send and an edit/regenerate. The
+  // caller has already placed the user message and a pending assistant slot;
+  // this fires the request, streams results into `assistantId`, and persists.
+  async function runGeneration({ convId, userId, assistantId, apiPrompt, images, count, size, quality, persistReferences = true }) {
     const requestId = crypto.randomUUID()
-    const userMessage = {
-      id: userId,
-      role: 'user',
-      text: prompt,
-      images: images.map((img) => `data:image/png;base64,${img.data}`),
-    }
-
-    // Auto-name an untouched conversation from its first prompt.
-    const isFirstMessage = (convMessages[convId]?.length || 0) === 0
-    if (isFirstMessage && prompt.trim()) {
-      const title = prompt.trim().slice(0, 40)
-      window.api.renameConversation({ id: convId, title })
-      setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, title } : c)))
-    }
-
-    // Placeholder assistant message with empty slots that fill in as images stream.
     inFlight.current.set(requestId, { convId, assistantId })
-    setConvMessages((prev) => ({
-      ...prev,
-      [convId]: [
-        ...(prev[convId] || []),
-        userMessage,
-        { id: assistantId, role: 'assistant', images: Array(count).fill(null), pending: true },
-      ],
-    }))
     setGeneratingIds((prev) => new Set(prev).add(convId))
 
     const result = await window.api.generateImages({
-      prompt,
+      prompt: apiPrompt,
       n: count,
       size,
       quality,
       referenceImages: images,
+      persistReferences,
+      instructionsOverride: effectiveInstructions(convId),
       requestId,
     })
 
@@ -184,6 +211,111 @@ export default function App() {
     })
   }
 
+  async function handleSend({ prompt, images, count, size, quality }) {
+    const convId = activeId
+    const userId = crypto.randomUUID()
+    const assistantId = crypto.randomUUID()
+    const userMessage = {
+      id: userId,
+      role: 'user',
+      text: prompt,
+      images: images.map((img) => `data:image/png;base64,${img.data}`),
+      // Remembered so this turn can be edited and regenerated later.
+      count,
+      size,
+      quality,
+    }
+
+    // The Images API is stateless, so weave the conversation's prior text
+    // instructions into the prompt we send (the displayed message keeps the
+    // raw text the user typed).
+    const apiPrompt = buildContextPrompt(convMessages[convId], prompt)
+
+    // Auto-name an untouched conversation from its first prompt.
+    const isFirstMessage = (convMessages[convId]?.length || 0) === 0
+    if (isFirstMessage && prompt.trim()) {
+      const title = prompt.trim().slice(0, 40)
+      window.api.renameConversation({ id: convId, title })
+      setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, title } : c)))
+    }
+
+    // Placeholder assistant message with empty slots that fill in as images stream.
+    setConvMessages((prev) => ({
+      ...prev,
+      [convId]: [
+        ...(prev[convId] || []),
+        userMessage,
+        { id: assistantId, role: 'assistant', images: Array(count).fill(null), pending: true },
+      ],
+    }))
+
+    await runGeneration({ convId, userId, assistantId, apiPrompt, images, count, size, quality })
+  }
+
+  // Edit a previously sent prompt and regenerate that turn's images in place.
+  async function handleEditMessage(userId, newText) {
+    const convId = activeId
+    const trimmed = (newText || '').trim()
+    if (!trimmed || generatingIds.has(convId)) return
+
+    const msgs = convMessages[convId] || []
+    const userIdx = msgs.findIndex((m) => m.id === userId)
+    if (userIdx === -1) return
+    const userMsg = msgs[userIdx]
+
+    // Reuse the same generation settings + reference images as the original
+    // turn. The references already live on disk, so read them back to base64.
+    const count = userMsg.count || msgs[userIdx + 1]?.images?.length || 1
+    const size = userMsg.size || 'auto'
+    const quality = userMsg.quality || 'auto'
+
+    const images = []
+    for (const id of userMsg.imageIds || []) {
+      const b64 = await window.api.readImage(id)
+      if (b64) images.push({ data: b64 })
+    }
+
+    // The message right after the prompt is its response — regenerate it in
+    // place. If there isn't one, insert a fresh assistant slot after the prompt.
+    const nextMsg = msgs[userIdx + 1]
+    const hasResponse = nextMsg && nextMsg.role !== 'user'
+    const assistantId = hasResponse ? nextMsg.id : crypto.randomUUID()
+
+    const apiPrompt = buildContextPrompt(msgs.slice(0, userIdx), trimmed)
+
+    // Apply the edited text and reset the response slot to pending.
+    setConvMessages((prev) => {
+      const cur = prev[convId] || []
+      const edited = cur.map((m) => (m.id === userId ? { ...m, text: trimmed } : m))
+      const placeholder = {
+        id: assistantId,
+        role: 'assistant',
+        images: Array(count).fill(null),
+        pending: true,
+      }
+      let result
+      if (hasResponse) {
+        result = edited.map((m) => (m.id === assistantId ? placeholder : m))
+      } else {
+        const i = edited.findIndex((m) => m.id === userId)
+        result = [...edited.slice(0, i + 1), placeholder, ...edited.slice(i + 1)]
+      }
+      return { ...prev, [convId]: result }
+    })
+
+    await runGeneration({
+      convId,
+      userId,
+      assistantId,
+      apiPrompt,
+      images,
+      count,
+      size,
+      quality,
+      persistReferences: false,
+    })
+  }
+
   // Stop the active conversation's in-flight generation. The generate promise
   // then resolves (canceled), and handleSend's continuation cleans up state.
   function handleStop() {
@@ -204,6 +336,35 @@ export default function App() {
     setConversations((prev) => [...prev, conv])
     setConvMessages((prev) => ({ ...prev, [conv.id]: [] }))
     setActiveId(conv.id)
+  }
+
+  // ---- Bots ----
+  // Open a bot: spin up a fresh tab bound to it, so generation there uses the
+  // bot's own instructions instead of the global ones.
+  async function handleOpenBot(bot) {
+    const conv = await window.api.createConversation({ botId: bot.id, title: bot.name })
+    setConversations((prev) => [...prev, conv])
+    setConvMessages((prev) => ({ ...prev, [conv.id]: [] }))
+    setActiveId(conv.id)
+  }
+
+  async function handleSaveBot({ name, instructions }) {
+    if (botModal?.id) {
+      const updated = await window.api.updateBot({ id: botModal.id, name, instructions })
+      setBots((prev) => prev.map((b) => (b.id === updated.id ? updated : b)))
+    } else {
+      const created = await window.api.createBot({ name, instructions })
+      setBots((prev) => [...prev, created])
+    }
+    setBotModal(null)
+  }
+
+  async function handleDeleteBot(bot) {
+    if (!window.confirm(`Xóa bot "${bot.name}"? Các cuộc trò chuyện đã mở vẫn được giữ lại.`)) {
+      return
+    }
+    const list = await window.api.deleteBot(bot.id)
+    setBots(list)
   }
 
   async function handleCloseTab(id) {
@@ -258,49 +419,77 @@ export default function App() {
     }
   }
 
+  const activeConv = conversations.find((c) => c.id === activeId)
+  const activeBot = activeConv?.botId ? bots.find((b) => b.id === activeConv.botId) : null
+
   return (
     <div className="app">
       <header className="topbar">
         <div className="topbar-title">ChatDKH</div>
-        <div className="topbar-actions">
-          <button className="icon-btn" onClick={() => setSettingsOpen(true)} title="Cài đặt">
-            ⚙
-          </button>
-        </div>
       </header>
 
-      <ConversationTabs
-        conversations={conversations}
-        activeId={activeId}
-        generatingIds={generatingIds}
-        onSelect={handleSelectTab}
-        onNew={handleNewTab}
-        onClose={handleCloseTab}
-        onRename={handleRenameTab}
-      />
+      <div className="app-body">
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          onToggle={() => setSidebarCollapsed((v) => !v)}
+          bots={bots}
+          onOpenBot={handleOpenBot}
+          onAddBot={() => setBotModal({})}
+          onEditBot={(bot) => setBotModal(bot)}
+          onDeleteBot={handleDeleteBot}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
 
-      <main className="chat-area" ref={scrollRef}>
-        {/* Keyed by activeId so switching tabs remounts and replays the fade. */}
-        <div className="chat-inner" key={activeId}>
-          {messages.length === 0 && (
-            <div className="empty-state">
-              <p>Nhập prompt để tạo ảnh.</p>
-              <p>Bạn có thể paste ảnh tham chiếu vào ô nhập (Ctrl+V).</p>
+        <div className="main-col">
+          <ConversationTabs
+            conversations={conversations}
+            activeId={activeId}
+            generatingIds={generatingIds}
+            onSelect={handleSelectTab}
+            onNew={handleNewTab}
+            onClose={handleCloseTab}
+            onRename={handleRenameTab}
+          />
+
+          <main className="chat-area" ref={scrollRef}>
+            {/* Keyed by activeId so switching tabs remounts and replays the fade. */}
+            <div className="chat-inner" key={activeId}>
+              {messages.length === 0 && (
+                <div className="empty-state">
+                  {activeBot ? (
+                    <>
+                      <p>🤖 Bot: <strong>{activeBot.name}</strong></p>
+                      <p>Cuộc trò chuyện này dùng Instructions riêng của bot.</p>
+                    </>
+                  ) : (
+                    <>
+                      <p>Nhập prompt để tạo ảnh.</p>
+                      <p>Bạn có thể paste ảnh tham chiếu vào ô nhập (Ctrl+V).</p>
+                    </>
+                  )}
+                </div>
+              )}
+              {messages.map((msg) => (
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                  onImageClick={handleImageClick}
+                  onEdit={handleEditMessage}
+                  editDisabled={isActiveGenerating}
+                />
+              ))}
             </div>
-          )}
-          {messages.map((msg) => (
-            <ChatMessage key={msg.id} message={msg} onImageClick={handleImageClick} />
-          ))}
-        </div>
-      </main>
+          </main>
 
-      <Composer
-        onSend={handleSend}
-        onStop={handleStop}
-        disabled={isActiveGenerating}
-        attachments={attachments}
-        setAttachments={setAttachments}
-      />
+          <Composer
+            onSend={handleSend}
+            onStop={handleStop}
+            disabled={isActiveGenerating}
+            attachments={attachments}
+            setAttachments={setAttachments}
+          />
+        </div>
+      </div>
 
       {lightbox && (
         <Lightbox
@@ -319,7 +508,13 @@ export default function App() {
         />
       )}
 
-      <UpdateWidget />
+      {botModal && (
+        <BotModal
+          bot={botModal.id ? botModal : null}
+          onSave={handleSaveBot}
+          onClose={() => setBotModal(null)}
+        />
+      )}
     </div>
   )
 }

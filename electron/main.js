@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, shell, Menu } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
@@ -21,6 +21,9 @@ const historyPath = path.join(app.getPath('userData'), 'history.json')
 // plus one messages file per conversation under conversations/.
 const conversationsDir = path.join(app.getPath('userData'), 'conversations')
 const indexPath = path.join(app.getPath('userData'), 'conversations.json')
+// User-defined bots: each carries its own Instructions, used in place of the
+// global custom instructions for any conversation opened from that bot.
+const botsPath = path.join(app.getPath('userData'), 'bots.json')
 
 // Serve stored images to the renderer via media://img/<id> without inlining
 // base64 into the DOM or the history file. Must be registered before app ready.
@@ -112,6 +115,22 @@ function writeIndex(idx) {
   fs.writeFileSync(indexPath, JSON.stringify(idx, null, 2))
 }
 
+// ---- Bot storage ----
+function readBots() {
+  try {
+    const data = JSON.parse(fs.readFileSync(botsPath, 'utf-8'))
+    if (Array.isArray(data)) return data
+  } catch {
+    // no bots yet
+  }
+  return []
+}
+
+function writeBots(bots) {
+  fs.mkdirSync(path.dirname(botsPath), { recursive: true })
+  fs.writeFileSync(botsPath, JSON.stringify(bots, null, 2))
+}
+
 function deriveTitle(messages) {
   if (!Array.isArray(messages)) return null
   const firstUser = messages.find((m) => m.role === 'user' && m.text)
@@ -143,12 +162,16 @@ function ensureIndex() {
 let win
 
 function createWindow() {
+  // Remove the default OS menu bar (File / Edit / View / …) app-wide.
+  Menu.setApplicationMenu(null)
+
   win = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 600,
     title: 'ChatDKH',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -408,7 +431,7 @@ async function generateOneSlot({ index, prompt, model, size, quality, imageFiles
 // matching network calls without touching other concurrent conversations.
 const activeGenerations = new Map()
 
-ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, referenceImages, requestId }) => {
+ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, referenceImages, persistReferences, instructionsOverride, requestId }) => {
   // Tag every progress frame with the request id so the renderer can route
   // partial images to the right conversation when several run concurrently.
   const emit = (payload) => emitProgress({ ...payload, requestId })
@@ -421,9 +444,14 @@ ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, refe
     }
     const model = store.get('model', 'gpt-image-1')
 
-    // Append the user's saved special requirements (e.g. "no background",
-    // "white background") to every prompt automatically.
-    const extra = store.get('customInstructions', '').trim()
+    // Append special requirements (e.g. "no background", "white background")
+    // to every prompt. A bot conversation passes its own instructions, which
+    // replace the global ones entirely; otherwise fall back to the global.
+    const extra = (
+      instructionsOverride !== undefined && instructionsOverride !== null
+        ? String(instructionsOverride)
+        : store.get('customInstructions', '')
+    ).trim()
     const fullPrompt = extra ? `${prompt}\n\n${extra}` : prompt
 
     // Decode reference files once and reuse across the parallel slot requests.
@@ -468,10 +496,13 @@ ipcMain.handle('image:generate', async (_event, { prompt, n, size, quality, refe
       throw firstErr ? firstErr.reason : new Error('Không tạo được ảnh nào.')
     }
 
-    // Reference images persist so they survive restarts.
-    const referenceImageIds = referenceImages
-      ? referenceImages.map((img) => saveImageFile(img.data))
-      : []
+    // Reference images persist so they survive restarts. On a regenerate the
+    // references are already on disk, so the caller passes persistReferences:
+    // false to avoid saving duplicate copies.
+    const referenceImageIds =
+      referenceImages && persistReferences !== false
+        ? referenceImages.map((img) => saveImageFile(img.data))
+        : []
 
     return { success: true, imageIds, referenceImageIds, canceled }
   } catch (err) {
@@ -496,14 +527,17 @@ ipcMain.handle('image:cancel', (_event, requestId) => {
 // ---- Conversation (tab) management ----
 ipcMain.handle('conversations:list', () => ensureIndex())
 
-ipcMain.handle('conversations:create', () => {
+ipcMain.handle('conversations:create', (_event, payload = {}) => {
   const idx = ensureIndex()
   const id = randomUUID()
   const conv = {
     id,
-    title: `Cuộc trò chuyện ${idx.list.length + 1}`,
+    title: payload.title || `Cuộc trò chuyện ${idx.list.length + 1}`,
     createdAt: Date.now(),
   }
+  // A conversation opened from a bot remembers it, so generation uses the
+  // bot's instructions instead of the global ones.
+  if (payload.botId) conv.botId = payload.botId
   idx.list.push(conv)
   idx.activeId = id
   writeConversation(id, [])
@@ -560,6 +594,38 @@ ipcMain.handle('conversations:delete', (_event, id) => {
   }
   writeIndex(idx)
   return idx
+})
+
+// ---- Bot management ----
+ipcMain.handle('bots:list', () => readBots())
+
+ipcMain.handle('bots:create', (_event, { name, instructions }) => {
+  const bots = readBots()
+  const bot = {
+    id: randomUUID(),
+    name: (name || '').trim() || 'Bot mới',
+    instructions: instructions || '',
+    createdAt: Date.now(),
+  }
+  bots.push(bot)
+  writeBots(bots)
+  return bot
+})
+
+ipcMain.handle('bots:update', (_event, { id, name, instructions }) => {
+  const bots = readBots()
+  const bot = bots.find((b) => b.id === id)
+  if (!bot) return null
+  if (name !== undefined) bot.name = name.trim() || bot.name
+  if (instructions !== undefined) bot.instructions = instructions
+  writeBots(bots)
+  return bot
+})
+
+ipcMain.handle('bots:delete', (_event, id) => {
+  const bots = readBots().filter((b) => b.id !== id)
+  writeBots(bots)
+  return bots
 })
 
 ipcMain.handle('conversation:get', (_event, id) => readConversation(id))
