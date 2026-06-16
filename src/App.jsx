@@ -396,13 +396,17 @@ export default function App() {
     setSettingsOpen(false)
   }
 
-  function handleImageClick(src, id) {
-    setLightbox({ src, id })
+  function handleImageClick(images, imageIds, index) {
+    setLightbox({ images, imageIds, index })
   }
 
+  // The id of the image currently shown in the lightbox (it tracks the index as
+  // the user arrows between a generation's images).
+  const lightboxId = lightbox?.imageIds?.[lightbox.index]
+
   async function handleUseForEdit() {
-    if (lightbox?.id) {
-      const b64 = await window.api.readImage(lightbox.id)
+    if (lightboxId) {
+      const b64 = await window.api.readImage(lightboxId)
       if (b64) {
         setAttachments((prev) => [
           ...prev,
@@ -414,9 +418,26 @@ export default function App() {
   }
 
   async function handleSaveLightbox() {
-    if (lightbox?.id) {
-      await window.api.saveImage({ id: lightbox.id, defaultName: 'image.png' })
+    if (lightboxId) {
+      await window.api.saveImage({ id: lightboxId, defaultName: buildDownloadName() })
     }
+  }
+
+  // A friendly, sortable default filename for downloads:
+  // "<conversation title>_<YYYY-MM-DD_HH-mm-ss>[_<n>].png" — the title makes it
+  // recognizable, the timestamp keeps files ordered, and the index disambiguates
+  // images from the same generation.
+  function buildDownloadName() {
+    const pad = (n) => String(n).padStart(2, '0')
+    const d = new Date()
+    const stamp =
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+      `_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`
+    const rawTitle = activeConv?.title?.trim() || 'ChatDKH'
+    const title = rawTitle.replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_').slice(0, 50) || 'ChatDKH'
+    const total = lightbox?.images?.length || 1
+    const suffix = total > 1 ? `_${(lightbox.index || 0) + 1}` : ''
+    return `${title}_${stamp}${suffix}.png`
   }
 
   const activeConv = conversations.find((c) => c.id === activeId)
@@ -495,8 +516,9 @@ export default function App() {
         <Lightbox
           image={lightbox}
           onClose={() => setLightbox(null)}
-          onSave={lightbox.id ? handleSaveLightbox : null}
-          onUseForEdit={lightbox.id ? handleUseForEdit : null}
+          onNavigate={(index) => setLightbox((lb) => ({ ...lb, index }))}
+          onSave={lightboxId ? handleSaveLightbox : null}
+          onUseForEdit={lightboxId ? handleUseForEdit : null}
         />
       )}
 

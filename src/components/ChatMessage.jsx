@@ -103,7 +103,7 @@ export default function ChatMessage({ message, onImageClick, onEdit, editDisable
                         src={src}
                         alt={`result-${idx}`}
                         loading="lazy"
-                        onClick={() => onImageClick(src, message.imageIds?.[idx])}
+                        onClick={() => onImageClick(message.images, message.imageIds, idx)}
                       />
                     </div>
                   ) : (
