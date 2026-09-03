@@ -75,6 +75,9 @@ export default function App() {
   const [generatingIds, setGeneratingIds] = useState(() => new Set())
   const [attachments, setAttachments] = useState([])
   const [lightbox, setLightbox] = useState(null)
+  // Sheet Batch Gen (1.2.0): a global queue run. `running` disables the button,
+  // `text` shows live progress from the sheet:batch:progress channel.
+  const [sheetBatch, setSheetBatch] = useState({ running: false, text: '' })
   const scrollRef = useRef(null)
   // In-flight generations keyed by requestId -> { convId, assistantId }, so
   // streamed frames from concurrent requests reach the right message slot.
@@ -324,6 +327,119 @@ export default function App() {
     }
   }
 
+  // Run the Sheet Batch: read the queue, then generate each pending concept as a
+  // turn in a NEW conversation so the user watches images appear (with streaming),
+  // and write each result back to the sheet. Global — not tied to the active tab.
+  async function handleSheetBatch() {
+    if (sheetBatch.running) return
+    setSheetBatch({ running: true, text: 'Đang đọc sheet…' })
+
+    const res = await window.api.fetchSheetPending()
+    if (!res || !res.ok) {
+      setSheetBatch({ running: false, text: '' })
+      window.alert(res?.error || 'Không đọc được sheet.')
+      return
+    }
+    const rows = res.rows || []
+    if (rows.length === 0) {
+      setSheetBatch({ running: false, text: 'Không có dòng nào đang chờ gen.' })
+      return
+    }
+
+    // A fresh conversation to hold this batch's results.
+    const stamp = new Date().toLocaleString()
+    const conv = await window.api.createConversation({ title: `Sheet Batch · ${stamp}` })
+    setConversations((prev) => [...prev, conv])
+    setConvMessages((prev) => ({ ...prev, [conv.id]: [] }))
+    setActiveId(conv.id)
+
+    let done = 0
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      setSheetBatch({ running: true, text: `Đang gen ${i + 1}/${rows.length}…` })
+
+      const userId = crypto.randomUUID()
+      const assistantId = crypto.randomUUID()
+      // A readable label for the concept (what the user "asked for").
+      const label = [row.line, row.recipient_text, row.year_text, row.ceramic_shape]
+        .filter(Boolean)
+        .join(' · ')
+
+      // Place the concept + a pending image slot into the conversation.
+      setConvMessages((prev) => ({
+        ...prev,
+        [conv.id]: [
+          ...(prev[conv.id] || []),
+          { id: userId, role: 'user', text: label || row.line },
+          { id: assistantId, role: 'assistant', images: [null], pending: true },
+        ],
+      }))
+
+      // Kernel missing (or other prep error) — mark and skip, keep going.
+      if (row._error || !row._prompt) {
+        setConvMessages((prev) => ({
+          ...prev,
+          [conv.id]: (prev[conv.id] || []).map((m) =>
+            m.id === assistantId ? { id: assistantId, role: 'error', text: row._error || 'Thiếu prompt.' } : m
+          ),
+        }))
+        await window.api.markSheetError({ row: row._row, message: row._error || 'no prompt' })
+        continue
+      }
+
+      // Reuse the app's generation pipeline. Registering in inFlight lets the
+      // existing onImageProgress handler stream partial frames into this slot,
+      // so the image builds up live just like a normal generation.
+      const requestId = crypto.randomUUID()
+      inFlight.current.set(requestId, { convId: conv.id, assistantId })
+
+      const result = await window.api.generateImages({
+        prompt: row._prompt,
+        n: 1,
+        size: '1024x1024',
+        quality: 'medium',
+        referenceImages: [],
+        persistReferences: false,
+        instructionsOverride: '', // kernel is the full brief; don't append global instructions
+        requestId,
+      })
+
+      inFlight.current.delete(requestId)
+
+      // Read the image id straight from the result — NOT inside the setState
+      // updater below, which React may run asynchronously (that timing bug made
+      // the sheet report "gen failed" even when the image was produced fine).
+      const okImageId = result.success ? result.imageIds && result.imageIds[0] : null
+
+      // Finalize the slot and persist; write the outcome back to the sheet.
+      setConvMessages((prev) => {
+        const next = (prev[conv.id] || []).map((m) => {
+          if (m.id !== assistantId) return m
+          if (result.success && okImageId) {
+            return {
+              id: assistantId,
+              role: 'assistant',
+              images: result.imageIds.map(mediaUrl),
+              imageIds: result.imageIds,
+            }
+          }
+          return { id: assistantId, role: 'error', text: result.error || 'Lỗi tạo ảnh.' }
+        })
+        window.api.saveConversation({ id: conv.id, messages: toPersisted(next) })
+        return { ...prev, [conv.id]: next }
+      })
+
+      if (result.success && okImageId) {
+        await window.api.markSheetDone({ row: row._row, imageId: okImageId })
+        done++
+      } else {
+        await window.api.markSheetError({ row: row._row, message: result.error || 'gen failed' })
+      }
+    }
+
+    setSheetBatch({ running: false, text: `Xong: đã gen ${done}/${rows.length} ảnh.` })
+  }
+
   function handleSelectTab(id) {
     if (id === activeId) return
     setActiveId(id)
@@ -445,8 +561,30 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="topbar">
+      <header
+        className="topbar"
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+      >
         <div className="topbar-title">ChatDKH</div>
+        <div
+          className="topbar-actions"
+          style={{ display: 'flex', alignItems: 'center', gap: 12 }}
+        >
+          {sheetBatch.text && (
+            <span className="topbar-status" style={{ fontSize: 13, opacity: 0.7 }}>
+              {sheetBatch.text}
+            </span>
+          )}
+          <button
+            type="button"
+            className="btn secondary"
+            onClick={handleSheetBatch}
+            disabled={sheetBatch.running}
+            title="Đọc Google Sheet queue và tạo ảnh cho các dòng đang chờ"
+          >
+            {sheetBatch.running ? '⏳ Đang gen…' : '🔄 Đồng bộ & Gen'}
+          </button>
+        </div>
       </header>
 
       <div className="app-body">

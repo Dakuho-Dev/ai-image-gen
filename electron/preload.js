@@ -29,12 +29,9 @@ contextBridge.exposeInMainWorld('api', {
   updateBot: (payload) => ipcRenderer.invoke('bots:update', payload),
   deleteBot: (id) => ipcRenderer.invoke('bots:delete', id),
   // Sheet batch gen (1.2.0)
-  runSheetBatch: () => ipcRenderer.invoke('sheet:batch'),
-  onSheetBatchProgress: (callback) => {
-    const listener = (_event, data) => callback(data)
-    ipcRenderer.on('sheet:batch:progress', listener)
-    return () => ipcRenderer.removeListener('sheet:batch:progress', listener)
-  },
+  fetchSheetPending: () => ipcRenderer.invoke('sheet:fetchPending'),
+  markSheetDone: (payload) => ipcRenderer.invoke('sheet:markDone', payload),
+  markSheetError: (payload) => ipcRenderer.invoke('sheet:markError', payload),
   // Auto update
   getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
   checkForUpdate: () => ipcRenderer.invoke('update:check'),

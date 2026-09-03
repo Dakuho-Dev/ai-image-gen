@@ -532,9 +532,9 @@ ipcMain.handle('image:cancel', (_event, requestId) => {
 })
 
 // ---- Sheet batch gen (1.2.0) ----
-// Đọc Google Sheet "queue" qua Apps Script → ghép kernel + slot → gen 1024/medium
-// bằng pipeline gpt-image sẵn có → lưu ảnh → ghi ngược status + image_path vào sheet.
-// Dòng có `line` và `status` trống được coi là hàng chờ gen; chạy lại không gen trùng.
+// Main chỉ lo I/O sheet + ghép prompt từ kernel. Việc gen + hiển thị do renderer
+// điều phối (App.jsx) để tái dùng đúng luồng streaming của app: mỗi concept hiện
+// thành một lượt trong một cuộc trò chuyện mới, ảnh chạy dần như gen thường.
 function kernelsDir() {
   return path.join(app.getPath('userData'), 'kernels')
 }
@@ -558,72 +558,58 @@ function buildSheetPrompt(line, slot) {
   return `${kernel}\n\n## THIS CONCEPT\n${body}`
 }
 
-// Emit tiến trình batch cho renderer (số dòng đã xử lý / tổng, và lỗi từng dòng).
-function emitSheetProgress(payload) {
-  if (win && !win.isDestroyed()) {
-    win.webContents.send('sheet:batch:progress', payload)
+function sheetConfig() {
+  return {
+    url: store.get('appsScriptUrl', '').trim(),
+    secret: store.get('appsScriptSecret', ''),
   }
 }
 
-ipcMain.handle('sheet:batch', async () => {
-  const url = store.get('appsScriptUrl', '').trim()
-  const secret = store.get('appsScriptSecret', '')
-  const apiKey = store.get('apiKey', '')
+// Ghi ngược một dòng qua GET query param (Apps Script 302-redirect làm rơi body POST).
+function sheetUpdate(row, status, image_path) {
+  const { url, secret } = sheetConfig()
+  if (!url) return Promise.resolve()
+  const qs =
+    `?secret=${encodeURIComponent(secret)}&action=update&row=${row}` +
+    `&status=${encodeURIComponent(status)}&image_path=${encodeURIComponent(image_path || '')}`
+  return fetch(url + qs).catch(() => {})
+}
+
+// Lấy các dòng chờ gen, kèm prompt đã ghép sẵn cho từng dòng (hoặc lỗi nếu thiếu kernel).
+ipcMain.handle('sheet:fetchPending', async () => {
+  const { url, secret } = sheetConfig()
   if (!url) return { ok: false, error: 'Chưa cấu hình Apps Script URL trong Cài đặt.' }
-  if (!apiKey) return { ok: false, error: 'Chưa cấu hình OpenAI API key trong Cài đặt.' }
-  const model = store.get('model', 'gpt-image-1')
-
-  // Ghi ngược status + image_path cho một dòng. Dùng GET query param (không phải
-  // POST body) vì Apps Script 302-redirect làm rơi body của POST. Không chặn vòng
-  // lặp nếu lỗi mạng.
-  const update = (row, status, image_path) => {
-    const qs =
-      `?secret=${encodeURIComponent(secret)}&action=update&row=${row}` +
-      `&status=${encodeURIComponent(status)}&image_path=${encodeURIComponent(image_path)}`
-    return fetch(url + qs).catch(() => {})
-  }
-
+  if (!store.get('apiKey', '')) return { ok: false, error: 'Chưa cấu hình OpenAI API key trong Cài đặt.' }
   try {
-    // 1) Lấy các dòng chờ gen.
-    const listRes = await fetch(`${url}?secret=${encodeURIComponent(secret)}&action=pending`)
-    const list = await listRes.json()
-    if (!list.ok) throw new Error(list.error || 'Không đọc được sheet.')
-
-    const rows = Array.isArray(list.rows) ? list.rows : []
-    emitSheetProgress({ status: 'start', total: rows.length })
-
-    let done = 0
-    for (let i = 0; i < rows.length; i++) {
-      const slot = rows[i]
+    const res = await fetch(`${url}?secret=${encodeURIComponent(secret)}&action=pending`)
+    const data = await res.json()
+    if (!data.ok) throw new Error(data.error || 'Không đọc được sheet.')
+    const rows = (Array.isArray(data.rows) ? data.rows : []).map((r) => {
+      let prompt = null
+      let error = null
       try {
-        const prompt = buildSheetPrompt(slot.line, slot)
-        // Tái dùng đúng pipeline gen của app (streaming + fallback). size/quality
-        // khóa cứng theo output-image-spec: 1024/medium, PNG, không upscale.
-        const b64 = await generateOneSlot({
-          index: 0,
-          prompt,
-          model,
-          size: '1024x1024',
-          quality: 'medium',
-          imageFiles: null,
-          apiKey,
-          emit: () => {},
-          signal: new AbortController().signal,
-        })
-        const id = saveImageFile(b64)
-        await update(slot._row, 'done', imagePath(id))
-        done++
-        emitSheetProgress({ status: 'progress', done, total: rows.length, row: slot._row })
-      } catch (e) {
-        await update(slot._row, `error: ${String(e.message || e).slice(0, 150)}`, '')
-        emitSheetProgress({ status: 'error', row: slot._row, message: String(e.message || e) })
+        prompt = buildSheetPrompt(r.line, r)
+      } catch {
+        error = `Không đọc được kernel cho "${r.line}" (thiếu file ${r.line}-kernel.md?)`
       }
-    }
-    emitSheetProgress({ status: 'done', generated: done, total: rows.length })
-    return { ok: true, generated: done, total: rows.length }
+      return { ...r, _prompt: prompt, _error: error }
+    })
+    return { ok: true, rows }
   } catch (e) {
     return { ok: false, error: String(e.message || e) }
   }
+})
+
+// Đánh dấu một dòng đã gen xong: status=done + image_path (đường dẫn file thật).
+ipcMain.handle('sheet:markDone', async (_event, { row, imageId }) => {
+  await sheetUpdate(row, 'done', imageId ? imagePath(imageId) : '')
+  return { ok: true }
+})
+
+// Đánh dấu một dòng lỗi.
+ipcMain.handle('sheet:markError', async (_event, { row, message }) => {
+  await sheetUpdate(row, `error: ${String(message || '').slice(0, 150)}`, '')
+  return { ok: true }
 })
 
 // ---- Conversation (tab) management ----
