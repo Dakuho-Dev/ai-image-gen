@@ -256,16 +256,23 @@ ipcMain.handle('settings:get', () => {
     baseURL: store.get('baseURL', ''),
     model: store.get('model', 'gpt-image-1'),
     customInstructions: store.get('customInstructions', ''),
+    appsScriptUrl: store.get('appsScriptUrl', ''),
+    appsScriptSecret: store.get('appsScriptSecret', ''),
   }
 })
 
-ipcMain.handle('settings:save', (_event, { apiKey, baseURL, model, customInstructions }) => {
-  store.set('apiKey', apiKey)
-  store.set('baseURL', baseURL)
-  store.set('model', model)
-  store.set('customInstructions', customInstructions ?? '')
-  return true
-})
+ipcMain.handle(
+  'settings:save',
+  (_event, { apiKey, baseURL, model, customInstructions, appsScriptUrl, appsScriptSecret }) => {
+    store.set('apiKey', apiKey)
+    store.set('baseURL', baseURL)
+    store.set('model', model)
+    store.set('customInstructions', customInstructions ?? '')
+    if (appsScriptUrl !== undefined) store.set('appsScriptUrl', appsScriptUrl ?? '')
+    if (appsScriptSecret !== undefined) store.set('appsScriptSecret', appsScriptSecret ?? '')
+    return true
+  }
+)
 
 // ---- Auto update controls (invoked from the renderer) ----
 ipcMain.handle('app:getVersion', () => app.getVersion())
@@ -522,6 +529,99 @@ ipcMain.handle('image:cancel', (_event, requestId) => {
     return true
   }
   return false
+})
+
+// ---- Sheet batch gen (1.2.0) ----
+// Đọc Google Sheet "queue" qua Apps Script → ghép kernel + slot → gen 1024/medium
+// bằng pipeline gpt-image sẵn có → lưu ảnh → ghi ngược status + image_path vào sheet.
+// Dòng có `line` và `status` trống được coi là hàng chờ gen; chạy lại không gen trùng.
+function kernelsDir() {
+  return path.join(app.getPath('userData'), 'kernels')
+}
+
+// Ghép khối kernel bất biến với các trường slot của một concept. Thuần chuỗi,
+// không tốn token LLM — chỉ nối kernel + các trường có giá trị.
+function buildSheetPrompt(line, slot) {
+  const kernel = fs.readFileSync(path.join(kernelsDir(), `${line}-kernel.md`), 'utf-8')
+  const fields = [
+    'recipient_text',
+    'year_text',
+    'ceramic_shape',
+    'raised_hologram_motif',
+    'flat_artwork',
+    'palette',
+  ]
+  const body = fields
+    .filter((k) => slot[k])
+    .map((k) => `${k}: ${slot[k]}`)
+    .join('\n')
+  return `${kernel}\n\n## THIS CONCEPT\n${body}`
+}
+
+// Emit tiến trình batch cho renderer (số dòng đã xử lý / tổng, và lỗi từng dòng).
+function emitSheetProgress(payload) {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('sheet:batch:progress', payload)
+  }
+}
+
+ipcMain.handle('sheet:batch', async () => {
+  const url = store.get('appsScriptUrl', '').trim()
+  const secret = store.get('appsScriptSecret', '')
+  const apiKey = store.get('apiKey', '')
+  if (!url) return { ok: false, error: 'Chưa cấu hình Apps Script URL trong Cài đặt.' }
+  if (!apiKey) return { ok: false, error: 'Chưa cấu hình OpenAI API key trong Cài đặt.' }
+  const model = store.get('model', 'gpt-image-1')
+
+  // Ghi ngược status + image_path cho một dòng (không chặn vòng lặp nếu lỗi mạng).
+  const update = (row, status, image_path) =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret, action: 'update', row, status, image_path }),
+    }).catch(() => {})
+
+  try {
+    // 1) Lấy các dòng chờ gen.
+    const listRes = await fetch(`${url}?secret=${encodeURIComponent(secret)}&action=pending`)
+    const list = await listRes.json()
+    if (!list.ok) throw new Error(list.error || 'Không đọc được sheet.')
+
+    const rows = Array.isArray(list.rows) ? list.rows : []
+    emitSheetProgress({ status: 'start', total: rows.length })
+
+    let done = 0
+    for (let i = 0; i < rows.length; i++) {
+      const slot = rows[i]
+      try {
+        const prompt = buildSheetPrompt(slot.line, slot)
+        // Tái dùng đúng pipeline gen của app (streaming + fallback). size/quality
+        // khóa cứng theo output-image-spec: 1024/medium, PNG, không upscale.
+        const b64 = await generateOneSlot({
+          index: 0,
+          prompt,
+          model,
+          size: '1024x1024',
+          quality: 'medium',
+          imageFiles: null,
+          apiKey,
+          emit: () => {},
+          signal: new AbortController().signal,
+        })
+        const id = saveImageFile(b64)
+        await update(slot._row, 'done', imagePath(id))
+        done++
+        emitSheetProgress({ status: 'progress', done, total: rows.length, row: slot._row })
+      } catch (e) {
+        await update(slot._row, `error: ${String(e.message || e).slice(0, 150)}`, '')
+        emitSheetProgress({ status: 'error', row: slot._row, message: String(e.message || e) })
+      }
+    }
+    emitSheetProgress({ status: 'done', generated: done, total: rows.length })
+    return { ok: true, generated: done, total: rows.length }
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) }
+  }
 })
 
 // ---- Conversation (tab) management ----

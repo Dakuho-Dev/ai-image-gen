@@ -5,6 +5,8 @@ export default function SettingsModal({ onSave, onClose, dismissible }) {
   const [baseURL, setBaseURL] = useState('')
   const [model, setModel] = useState('gpt-image-1')
   const [customInstructions, setCustomInstructions] = useState('')
+  const [appsScriptUrl, setAppsScriptUrl] = useState('')
+  const [appsScriptSecret, setAppsScriptSecret] = useState('')
   const [imagesFolder, setImagesFolder] = useState('')
   const [folderMsg, setFolderMsg] = useState('')
 
@@ -14,6 +16,8 @@ export default function SettingsModal({ onSave, onClose, dismissible }) {
       setBaseURL(settings.baseURL || '')
       setModel(settings.model || 'gpt-image-1')
       setCustomInstructions(settings.customInstructions || '')
+      setAppsScriptUrl(settings.appsScriptUrl || '')
+      setAppsScriptSecret(settings.appsScriptSecret || '')
     })
     window.api.getImagesFolder().then(setImagesFolder)
   }, [])
@@ -38,6 +42,8 @@ export default function SettingsModal({ onSave, onClose, dismissible }) {
       baseURL: baseURL.trim(),
       model: model.trim() || 'gpt-image-1',
       customInstructions: customInstructions.trim(),
+      appsScriptUrl: appsScriptUrl.trim(),
+      appsScriptSecret: appsScriptSecret.trim(),
     })
   }
 
@@ -99,6 +105,32 @@ export default function SettingsModal({ onSave, onClose, dismissible }) {
           <p className="hint">
             Những yêu cầu này được lưu lại và tự động nối vào cuối prompt mỗi lần tạo ảnh. Để
             trống nếu không cần.
+          </p>
+
+          <label htmlFor="appsScriptUrl" style={{ marginTop: 12 }}>
+            Google Sheet — Apps Script URL (Sheet Batch Gen)
+          </label>
+          <input
+            id="appsScriptUrl"
+            type="text"
+            value={appsScriptUrl}
+            onChange={(e) => setAppsScriptUrl(e.target.value)}
+            placeholder="https://script.google.com/macros/s/…/exec"
+          />
+
+          <label htmlFor="appsScriptSecret" style={{ marginTop: 12 }}>
+            Apps Script Secret
+          </label>
+          <input
+            id="appsScriptSecret"
+            type="password"
+            value={appsScriptSecret}
+            onChange={(e) => setAppsScriptSecret(e.target.value)}
+            placeholder="Chuỗi bí mật khớp SECRET trong Apps Script"
+          />
+          <p className="hint">
+            Dùng cho tính năng gen ảnh hàng loạt từ Google Sheet queue. Để trống nếu không dùng.
+            Cả hai phải khớp cấu hình trong Apps Script đã deploy.
           </p>
 
           <div className="modal-actions">
