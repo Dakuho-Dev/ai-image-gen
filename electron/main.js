@@ -573,13 +573,15 @@ ipcMain.handle('sheet:batch', async () => {
   if (!apiKey) return { ok: false, error: 'Chưa cấu hình OpenAI API key trong Cài đặt.' }
   const model = store.get('model', 'gpt-image-1')
 
-  // Ghi ngược status + image_path cho một dòng (không chặn vòng lặp nếu lỗi mạng).
-  const update = (row, status, image_path) =>
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret, action: 'update', row, status, image_path }),
-    }).catch(() => {})
+  // Ghi ngược status + image_path cho một dòng. Dùng GET query param (không phải
+  // POST body) vì Apps Script 302-redirect làm rơi body của POST. Không chặn vòng
+  // lặp nếu lỗi mạng.
+  const update = (row, status, image_path) => {
+    const qs =
+      `?secret=${encodeURIComponent(secret)}&action=update&row=${row}` +
+      `&status=${encodeURIComponent(status)}&image_path=${encodeURIComponent(image_path)}`
+    return fetch(url + qs).catch(() => {})
+  }
 
   try {
     // 1) Lấy các dòng chờ gen.
