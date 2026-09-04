@@ -21,7 +21,22 @@ export default function ChatMessage({ message, onImageClick, onEdit, editDisable
   const isUser = role === 'user'
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(message.text || '')
-  const canEdit = isUser && onEdit && message.text
+  const [copied, setCopied] = useState(false)
+  // Lượt "viết listing" chỉ là nhãn kèm ảnh nguồn — sửa nó sẽ gen lại ảnh, không
+  // phải viết lại listing, nên không mời sửa.
+  const canEdit = isUser && onEdit && message.text && !message.kind
+  // Listing do bot viết thường được dán thẳng lên Etsy — cho copy một phát.
+  const canCopy = !isUser && message.text && !message.pending
+
+  async function copyText() {
+    try {
+      await navigator.clipboard.writeText(message.text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // clipboard bị chặn — bỏ qua, người dùng vẫn bôi đen copy tay được
+    }
+  }
 
   function startEdit() {
     setDraft(message.text || '')
@@ -91,6 +106,11 @@ export default function ChatMessage({ message, onImageClick, onEdit, editDisable
                       ✏️ Sửa
                     </button>
                   )}
+                  {canCopy && (
+                    <button className="edit-btn" onClick={copyText} title="Sao chép nội dung">
+                      {copied ? '✅ Đã chép' : '📋 Sao chép'}
+                    </button>
+                  )}
                 </div>
               )
             )}
@@ -103,7 +123,9 @@ export default function ChatMessage({ message, onImageClick, onEdit, editDisable
                         src={src}
                         alt={`result-${idx}`}
                         loading="lazy"
-                        onClick={() => onImageClick(message.images, message.imageIds, idx)}
+                        onClick={() =>
+                          onImageClick(message.images, message.imageIds, idx, message.labels)
+                        }
                       />
                     </div>
                   ) : (

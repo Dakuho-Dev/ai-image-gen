@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react'
 
-export default function Lightbox({ image, onClose, onSave, onUseForEdit, onNavigate }) {
+export default function Lightbox({ image, onClose, onSave, onSaveAll, onUseForEdit, onMakeMockups, onWriteListing, listingBusy, onNavigate }) {
   const { images = [], index = 0 } = image
   const src = images[index] ?? image.src
   const hasMultiple = images.length > 1
@@ -54,9 +54,24 @@ export default function Lightbox({ image, onClose, onSave, onUseForEdit, onNavig
               ✎ Dùng ảnh này để chỉnh sửa
             </button>
           )}
+          {onWriteListing && (
+            <button className="btn secondary" onClick={onWriteListing} disabled={listingBusy}>
+              {listingBusy ? '⏳ Đang viết…' : '✍️ Viết tiêu đề & mô tả'}
+            </button>
+          )}
+          {onMakeMockups && (
+            <button className="btn secondary" onClick={onMakeMockups}>
+              🖼️ Tạo bộ mockup
+            </button>
+          )}
           {onSave && (
             <button className="btn secondary" onClick={onSave}>
               ⬇ Lưu ảnh
+            </button>
+          )}
+          {onSaveAll && (
+            <button className="btn secondary" onClick={onSaveAll}>
+              📦 Lưu cả bộ ({image.imageIds.length})
             </button>
           )}
           <button className="btn secondary" onClick={onClose}>

@@ -21,6 +21,11 @@ function toPersisted(messages) {
       role: m.role,
       text: m.text,
       imageIds: m.imageIds,
+      // Đánh dấu lượt đặc biệt (vd yêu cầu viết listing) để UI không mời sửa
+      // & tạo lại ảnh từ nó sau khi tải lại hội thoại.
+      kind: m.kind,
+      // Tên từng shot trong một bộ ảnh (mockup), dùng để đặt tên file khi lưu cả bộ.
+      labels: m.labels,
       count: m.count,
       size: m.size,
       quality: m.quality,
@@ -58,6 +63,16 @@ function buildContextPrompt(priorMessages, currentPrompt) {
   )
 }
 
+// "YYYY-MM-DD_HH-mm-ss" — dùng chung cho tên file và tên thư mục xuất ảnh.
+function timestamp() {
+  const pad = (n) => String(n).padStart(2, '0')
+  const d = new Date()
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`
+  )
+}
+
 export default function App() {
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
@@ -78,6 +93,8 @@ export default function App() {
   // Sheet Batch Gen (1.2.0): a global queue run. `running` disables the button,
   // `text` shows live progress from the sheet:batch:progress channel.
   const [sheetBatch, setSheetBatch] = useState({ running: false, text: '' })
+  // Listing writer (1.4.0): true trong lúc model đang đọc ảnh + wiki để viết listing.
+  const [listingBusy, setListingBusy] = useState(false)
   const scrollRef = useRef(null)
   // In-flight generations keyed by requestId -> { convId, assistantId }, so
   // streamed frames from concurrent requests reach the right message slot.
@@ -127,13 +144,16 @@ export default function App() {
       const f = inFlight.current.get(requestId)
       if (!f) return
       const src = `data:image/png;base64,${b64}`
+      // Một bộ mockup là nhiều request 1-ảnh đổ chung vào một lưới, nên ô đích do
+      // request quyết định (f.slot); gen thường thì lấy index trong chính request.
+      const slot = f.slot ?? index
       setConvMessages((prev) => {
         const msgs = prev[f.convId]
         if (!msgs) return prev
         const updated = msgs.map((m) => {
           if (m.id !== f.assistantId) return m
           const images = [...m.images]
-          images[index] = src
+          images[slot] = src
           return { ...m, images }
         })
         return { ...prev, [f.convId]: updated }
@@ -440,6 +460,175 @@ export default function App() {
     setSheetBatch({ running: false, text: `Xong: đã gen ${done}/${rows.length} ảnh.` })
   }
 
+  // Tạo CẢ BỘ mockup từ một ảnh đã duyệt: mỗi shot trong mockup-shots.md là một
+  // prompt riêng, nhưng tất cả đổ vào MỘT message nhiều ô như chức năng tạo
+  // nhiều ảnh — xem cả bộ trong một lưới và lưu một lần thay vì tải từng tấm.
+  async function handleMakeMockups(imageId) {
+    if (!imageId || sheetBatch.running) return
+    setLightbox(null)
+    setSheetBatch({ running: true, text: 'Đang chuẩn bị mockup…' })
+
+    const shotsRes = await window.api.getMockupShots()
+    if (!shotsRes || !shotsRes.ok) {
+      setSheetBatch({ running: false, text: '' })
+      window.alert(shotsRes?.error || 'Không đọc được mockup-shots.md.')
+      return
+    }
+    const b64 = await window.api.readImage(imageId)
+    if (!b64) {
+      setSheetBatch({ running: false, text: '' })
+      window.alert('Không đọc được ảnh gốc để làm reference.')
+      return
+    }
+    const { preamble, shots } = shotsRes
+
+    const stamp = new Date().toLocaleString()
+    const conv = await window.api.createConversation({ title: `Mockup · ${stamp}` })
+    setConversations((prev) => [...prev, conv])
+    setActiveId(conv.id)
+
+    const userId = crypto.randomUUID()
+    const assistantId = crypto.randomUUID()
+    setConvMessages((prev) => ({
+      ...prev,
+      [conv.id]: [
+        {
+          id: userId,
+          role: 'user',
+          text: `🖼️ Tạo bộ mockup ${shots.length} ảnh từ ảnh này`,
+          kind: 'mockup',
+          images: [mediaUrl(imageId)],
+          imageIds: [imageId],
+        },
+        {
+          id: assistantId,
+          role: 'assistant',
+          images: Array(shots.length).fill(null),
+          pending: true,
+        },
+      ],
+    }))
+
+    setGeneratingIds((prev) => new Set(prev).add(conv.id))
+    setSheetBatch({ running: true, text: `Đang tạo ${shots.length} mockup…` })
+
+    // Chạy song song đúng như khi gen nhiều ảnh: mỗi shot stream vào ô của nó,
+    // lưới đầy dần thay vì phải chờ hết bộ.
+    const results = await Promise.all(
+      shots.map(async (shot, slot) => {
+        const requestId = crypto.randomUUID()
+        inFlight.current.set(requestId, { convId: conv.id, assistantId, slot })
+        try {
+          return await window.api.generateImages({
+            prompt: `${preamble}\n\n${shot.text}`,
+            n: 1,
+            size: '1024x1024',
+            quality: 'medium',
+            referenceImages: [{ data: b64 }],
+            persistReferences: false,
+            instructionsOverride: '', // shot đã là brief đầy đủ
+            requestId,
+          })
+        } catch (err) {
+          // Một shot hỏng không được kéo đổ cả bộ — báo riêng ô đó là lỗi.
+          return { success: false, error: String(err?.message || err) }
+        } finally {
+          inFlight.current.delete(requestId)
+        }
+      })
+    )
+
+    setGeneratingIds((prev) => {
+      const next = new Set(prev)
+      next.delete(conv.id)
+      return next
+    })
+
+    // Giữ ảnh và tên shot khớp nhau, bỏ hẳn ô hỏng để lưới không kẹt spinner.
+    const done = results
+      .map((r, i) => ({ id: r?.success ? r.imageIds?.[0] : null, name: shots[i].name }))
+      .filter((x) => x.id)
+    const failed = shots.filter((_, i) => !results[i]?.success).map((s) => s.name)
+
+    setConvMessages((prev) => {
+      const next = (prev[conv.id] || []).map((m) => {
+        if (m.id !== assistantId) return m
+        if (done.length === 0) {
+          return {
+            id: assistantId,
+            role: 'error',
+            text: results.find((r) => r?.error)?.error || 'Không tạo được mockup nào.',
+          }
+        }
+        return {
+          id: assistantId,
+          role: 'assistant',
+          text: failed.length ? `Thiếu ${failed.length} shot: ${failed.join(', ')}` : undefined,
+          images: done.map((x) => mediaUrl(x.id)),
+          imageIds: done.map((x) => x.id),
+          labels: done.map((x) => x.name),
+        }
+      })
+      window.api.saveConversation({ id: conv.id, messages: toPersisted(next) })
+      return { ...prev, [conv.id]: next }
+    })
+
+    setSheetBatch({
+      running: false,
+      text: `Xong: ${done.length}/${shots.length} mockup.`,
+    })
+  }
+
+  // Viết listing (title / 13 tags / description) cho MỘT ảnh đã duyệt. Model
+  // NHÌN chính tấm ảnh đó (không phải mô tả lại prompt) cộng với khối wiki trong
+  // userData/wiki/*.md; kết quả rơi vào hội thoại đang xem như một lượt bình thường.
+  async function handleWriteListing(imageId) {
+    if (!imageId || listingBusy) return
+    const convId = activeId
+    const msgs = convMessages[convId] || []
+
+    // Bối cảnh = prompt của chính lượt sinh ra tấm ảnh này (lượt user ngay trước).
+    const imgIdx = msgs.findIndex((m) => (m.imageIds || []).includes(imageId))
+    const context = imgIdx > 0 ? msgs[imgIdx - 1]?.text || '' : ''
+
+    setLightbox(null)
+    setListingBusy(true)
+
+    const userId = crypto.randomUUID()
+    const assistantId = crypto.randomUUID()
+    setConvMessages((prev) => ({
+      ...prev,
+      [convId]: [
+        ...(prev[convId] || []),
+        // Kèm chính tấm ảnh nguồn vào lượt hỏi: trong tab có hàng chục ảnh, một
+        // nhãn chữ không cho biết listing này viết cho ảnh nào.
+        {
+          id: userId,
+          role: 'user',
+          text: '✍️ Viết tiêu đề & mô tả cho ảnh này',
+          kind: 'listing',
+          images: [mediaUrl(imageId)],
+          imageIds: [imageId],
+        },
+        { id: assistantId, role: 'assistant', text: 'Đang đọc ảnh và wiki…', pending: true },
+      ],
+    }))
+
+    const res = await window.api.generateListing({ imageId, context })
+    setListingBusy(false)
+
+    setConvMessages((prev) => {
+      const next = (prev[convId] || []).map((m) => {
+        if (m.id !== assistantId) return m
+        return res?.ok
+          ? { id: assistantId, role: 'assistant', text: res.text }
+          : { id: assistantId, role: 'error', text: res?.error || 'Không viết được listing.' }
+      })
+      window.api.saveConversation({ id: convId, messages: toPersisted(next) })
+      return { ...prev, [convId]: next }
+    })
+  }
+
   function handleSelectTab(id) {
     if (id === activeId) return
     setActiveId(id)
@@ -512,8 +701,8 @@ export default function App() {
     setSettingsOpen(false)
   }
 
-  function handleImageClick(images, imageIds, index) {
-    setLightbox({ images, imageIds, index })
+  function handleImageClick(images, imageIds, index, labels) {
+    setLightbox({ images, imageIds, index, labels })
   }
 
   // The id of the image currently shown in the lightbox (it tracks the index as
@@ -539,16 +728,32 @@ export default function App() {
     }
   }
 
+  // Lưu cả bộ ảnh đang mở (vd 8 mockup) vào một thư mục con, file đánh số theo
+  // thứ tự và đặt tên theo shot — không phải mở từng ảnh bấm lưu từng cái.
+  async function handleSaveAll() {
+    const ids = lightbox?.imageIds || []
+    if (ids.length === 0) return
+    const items = ids.map((id, i) => ({ id, name: lightbox.labels?.[i] }))
+    const res = await window.api.saveImages({ items, folderName: buildFolderName() })
+    if (res?.success) {
+      const missing = res.failed?.length ? ` (${res.failed.length} ảnh lỗi)` : ''
+      setSheetBatch({ running: false, text: `Đã lưu ${res.saved}/${res.total} ảnh${missing}.` })
+    }
+  }
+
+  // Tên thư mục xuất: "<tiêu đề tab>_<YYYY-MM-DD_HH-mm-ss>" cho dễ tìm lại.
+  function buildFolderName() {
+    const rawTitle = activeConv?.title?.trim() || 'ChatDKH'
+    const title = rawTitle.replace(/[\\/:*?"<>|·]+/g, '').replace(/\s+/g, '_').slice(0, 40)
+    return `${title || 'ChatDKH'}_${timestamp()}`
+  }
+
   // A friendly, sortable default filename for downloads:
   // "<conversation title>_<YYYY-MM-DD_HH-mm-ss>[_<n>].png" — the title makes it
   // recognizable, the timestamp keeps files ordered, and the index disambiguates
   // images from the same generation.
   function buildDownloadName() {
-    const pad = (n) => String(n).padStart(2, '0')
-    const d = new Date()
-    const stamp =
-      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
-      `_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`
+    const stamp = timestamp()
     const rawTitle = activeConv?.title?.trim() || 'ChatDKH'
     const title = rawTitle.replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_').slice(0, 50) || 'ChatDKH'
     const total = lightbox?.images?.length || 1
@@ -656,7 +861,11 @@ export default function App() {
           onClose={() => setLightbox(null)}
           onNavigate={(index) => setLightbox((lb) => ({ ...lb, index }))}
           onSave={lightboxId ? handleSaveLightbox : null}
+          onSaveAll={(lightbox.imageIds?.length || 0) > 1 ? handleSaveAll : null}
           onUseForEdit={lightboxId ? handleUseForEdit : null}
+          onMakeMockups={lightboxId ? () => handleMakeMockups(lightboxId) : null}
+          onWriteListing={lightboxId ? () => handleWriteListing(lightboxId) : null}
+          listingBusy={listingBusy}
         />
       )}
 

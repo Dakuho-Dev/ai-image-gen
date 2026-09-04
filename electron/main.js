@@ -255,6 +255,8 @@ ipcMain.handle('settings:get', () => {
     apiKey: store.get('apiKey', ''),
     baseURL: store.get('baseURL', ''),
     model: store.get('model', 'gpt-image-1'),
+    // Model viết chữ (nhìn ảnh + wiki). Tách riêng vì `model` là model ảnh.
+    textModel: store.get('textModel', 'gpt-4.1'),
     customInstructions: store.get('customInstructions', ''),
     appsScriptUrl: store.get('appsScriptUrl', ''),
     appsScriptSecret: store.get('appsScriptSecret', ''),
@@ -263,10 +265,11 @@ ipcMain.handle('settings:get', () => {
 
 ipcMain.handle(
   'settings:save',
-  (_event, { apiKey, baseURL, model, customInstructions, appsScriptUrl, appsScriptSecret }) => {
+  (_event, { apiKey, baseURL, model, textModel, customInstructions, appsScriptUrl, appsScriptSecret }) => {
     store.set('apiKey', apiKey)
     store.set('baseURL', baseURL)
     store.set('model', model)
+    if (textModel !== undefined) store.set('textModel', textModel || 'gpt-4.1')
     store.set('customInstructions', customInstructions ?? '')
     if (appsScriptUrl !== undefined) store.set('appsScriptUrl', appsScriptUrl ?? '')
     if (appsScriptSecret !== undefined) store.set('appsScriptSecret', appsScriptSecret ?? '')
@@ -612,6 +615,283 @@ ipcMain.handle('sheet:markError', async (_event, { row, message }) => {
   return { ok: true }
 })
 
+// ---- Mockup set (1.3.0) ----
+// Đọc mockup-shots.md (dùng chung mọi sản phẩm): preamble + danh sách shot.
+// Renderer dùng ảnh đã duyệt làm reference rồi lặp gen từng shot.
+ipcMain.handle('mockup:getShots', () => {
+  try {
+    const raw = fs.readFileSync(path.join(kernelsDir(), 'mockup-shots.md'), 'utf-8')
+    const parts = raw.split('## SHOTS')
+    const preamble = ((parts[0] || '').split('## PREAMBLE')[1] || '').trim()
+    const shots = (parts[1] || '')
+      .split('\n')
+      .filter((l) => l.trim().startsWith('- '))
+      .map((l) => {
+        const seg = l.replace(/^\s*-\s*/, '').split(' | ')
+        return { name: (seg[0] || '').trim(), text: seg.slice(1).join(' | ').trim() }
+      })
+      .filter((s) => s.name && s.text)
+    if (!preamble || shots.length === 0) throw new Error('mockup-shots.md sai định dạng')
+    return { ok: true, preamble, shots }
+  } catch (e) {
+    return { ok: false, error: `Không đọc được mockup-shots.md (đặt trong kernels/). ${String(e.message || e)}` }
+  }
+})
+
+// ---- Listing writer (1.4.0) ----
+// "Wiki" = một thư mục markdown do người dùng trỏ tới (mặc định userData/wiki,
+// nhưng thường là một vault Obsidian có sẵn). Vault thật có thể vài MB / hàng
+// trăm file, nên KHÔNG nuốt cả thư mục: người dùng tick chọn đúng những file
+// làm luật viết listing, lựa chọn đó lưu trong config. Các file được chọn nối
+// thành MỘT khối kiến thức đặt vào system message; ảnh đã duyệt gửi kèm dưới
+// dạng image_url để model NHÌN sản phẩm thật thay vì mô tả lại prompt.
+const DEFAULT_WIKI_DIR = path.join(app.getPath('userData'), 'wiki')
+
+// Trên ngưỡng này mà chưa tick file nào thì bắt chọn, thay vì âm thầm gửi cả
+// vault lên API (vừa đắt vừa loãng).
+const WIKI_AUTO_LIMIT = 200_000
+
+function wikiDir() {
+  return store.get('wikiDir', DEFAULT_WIKI_DIR) || DEFAULT_WIKI_DIR
+}
+
+// Bản mẫu chỉ tạo cho thư mục wiki mặc định, và chỉ khi nó chưa tồn tại — không
+// bao giờ ghi gì vào vault của người dùng.
+const WIKI_TEMPLATE = `# WIKI — Chuẩn viết listing Etsy (bản mẫu, hãy sửa theo chuẩn của Dakuho)
+
+## TITLE
+- Tối đa 140 ký tự; những từ ĐẦU tiên quan trọng nhất (Etsy và Google cắt ở ~60 ký tự đầu).
+- Mở đầu bằng cụm khách thật sự gõ (vd "Personalized Teacher Christmas Ornament"), không mở đầu bằng tên shop.
+- Viết như một câu người đọc được, phân tách bằng " - " hoặc ","; KHÔNG nhồi từ khoá lặp lại.
+- Ghép được các lớp: [sản phẩm] + [thuộc tính/chất liệu] + [dịp/người nhận] + [cá nhân hoá].
+
+## TAGS
+- Đúng 13 tag, mỗi tag TỐI ĐA 20 ký tự (kể cả dấu cách) — tag dài hơn sẽ bị bỏ.
+- Ưu tiên cụm 2–3 từ (long-tail), không dùng tag 1 từ chung chung như "gift".
+- Không lặp lại y hệt nhau; phủ nhiều góc: sản phẩm, dịp, người nhận, phong cách, chất liệu.
+- Không dùng tên thương hiệu/nhân vật có bản quyền.
+
+## DESCRIPTION
+- ~160 ký tự đầu là đoạn Google/AI trích dẫn → nêu ngay sản phẩm là gì, cho ai, dịp nào.
+- Sau đó: đoạn cảm xúc ngắn → gạch đầu dòng thông số (chất liệu, kích thước, cá nhân hoá) → hướng dẫn đặt hàng.
+- Viết bằng tiếng Anh tự nhiên, giọng ấm áp, không hứa hẹn quá mức.
+
+## CẤM
+- Không bịa chất liệu, kích thước, thời gian giao hàng nếu wiki/bối cảnh không nêu.
+- Không tuyên bố y tế, không so sánh với thương hiệu khác, không dùng tên nhân vật/logo có bản quyền.
+`
+
+function ensureWikiDir() {
+  const dir = wikiDir()
+  if (dir === DEFAULT_WIKI_DIR && !fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'etsy-listing-wiki.md'), WIKI_TEMPLATE)
+  }
+  return dir
+}
+
+// Thư mục rác của vault/repo — quét vào chỉ tốn thời gian.
+const WIKI_SKIP_DIRS = new Set(['.obsidian', '.git', '.trash', 'node_modules', '.smart-env'])
+
+// Quét đệ quy mọi .md, trả về đường dẫn tương đối + kích thước.
+function scanWiki(dir) {
+  const out = []
+  const walk = (abs, rel) => {
+    let entries
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const childRel = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) {
+        if (!WIKI_SKIP_DIRS.has(e.name)) walk(path.join(abs, e.name), childRel)
+      } else if (e.isFile() && e.name.toLowerCase().endsWith('.md')) {
+        let size = 0
+        try {
+          size = fs.statSync(path.join(abs, e.name)).size
+        } catch {
+          // file vừa bị xoá — bỏ qua
+        }
+        out.push({ rel: childRel, size })
+      }
+    }
+  }
+  walk(dir, '')
+  return out.sort((a, b) => a.rel.localeCompare(b.rel))
+}
+
+// Chặn ../ thoát khỏi thư mục wiki khi đọc theo lựa chọn đã lưu.
+function wikiFilePath(dir, rel) {
+  const abs = path.resolve(dir, rel)
+  const root = path.resolve(dir)
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null
+  return abs
+}
+
+// Nối các file được chọn thành khối kiến thức. Không chọn gì thì lấy tất cả,
+// nhưng chỉ khi tổng dung lượng còn nhỏ — vault lớn bắt buộc phải tick.
+function readWiki() {
+  const dir = ensureWikiDir()
+  const all = scanWiki(dir)
+  const selected = store.get('wikiFiles', [])
+  const picked = selected.length > 0 ? all.filter((f) => selected.includes(f.rel)) : all
+
+  if (picked.length === 0) {
+    throw new Error(
+      selected.length > 0
+        ? 'Các file wiki đã chọn không còn tồn tại. Vào Cài đặt → chọn lại.'
+        : `Không tìm thấy file .md nào trong ${dir}. Vào Cài đặt để chọn thư mục wiki.`
+    )
+  }
+
+  const bytes = picked.reduce((s, f) => s + f.size, 0)
+  if (selected.length === 0 && bytes > WIKI_AUTO_LIMIT) {
+    throw new Error(
+      `Thư mục wiki có ${all.length} file (${Math.round(bytes / 1024)} KB) — quá lớn để gửi hết. ` +
+        `Vào Cài đặt → tick chọn những file cần dùng.`
+    )
+  }
+
+  const parts = []
+  const files = []
+  for (const f of picked) {
+    const abs = wikiFilePath(dir, f.rel)
+    if (!abs) continue
+    try {
+      parts.push(`<!-- ${f.rel} -->\n${fs.readFileSync(abs, 'utf-8').trim()}`)
+      files.push(f.rel)
+    } catch {
+      // file không đọc được — bỏ qua, phần còn lại vẫn dùng được
+    }
+  }
+  return { dir, files, bytes, text: parts.join('\n\n---\n\n') }
+}
+
+const LISTING_SYSTEM = `Bạn là chuyên gia viết listing Etsy của Dakuho.
+
+Bạn nhận MỘT ảnh sản phẩm đã được duyệt, phần bối cảnh của concept đó, và khối WIKI bên dưới.
+WIKI là luật — mọi quy tắc về title/tag/description đều lấy từ đó.
+
+Nguyên tắc bắt buộc:
+- Chỉ mô tả những gì THỰC SỰ nhìn thấy trong ảnh (hình dạng, motif, màu, chữ trên sản phẩm).
+  Ảnh mới là sự thật; bối cảnh chỉ để tham khảo khi hai bên lệch nhau.
+- Không bịa chất liệu, kích thước, số lượng, thời gian giao hàng nếu WIKI hoặc bối cảnh không nêu.
+- Nội dung listing viết bằng TIẾNG ANH.
+
+Nếu WIKI quy định khuôn output riêng (vd title A/B, số ký tự bắt buộc, trường evidence),
+hãy theo ĐÚNG khuôn của WIKI. Chỉ khi WIKI không quy định thì dùng khuôn mặc định sau,
+không thêm lời dẫn, không dùng markdown heading:
+
+TITLE
+<một dòng>
+
+TAGS
+<đúng 13 tag, ngăn cách bằng dấu phẩy, mỗi tag tối đa 20 ký tự>
+
+DESCRIPTION
+<nhiều dòng>`
+
+// Thông tin thư mục wiki cho phần Cài đặt.
+// Danh sách mọi .md trong thư mục wiki + những file đang được tick chọn, để
+// phần Cài đặt vẽ bảng chọn.
+ipcMain.handle('wiki:info', () => {
+  try {
+    const dir = ensureWikiDir()
+    const all = scanWiki(dir)
+    const selected = store.get('wikiFiles', []).filter((rel) => all.some((f) => f.rel === rel))
+    return { ok: true, dir, files: all, selected, autoLimit: WIKI_AUTO_LIMIT }
+  } catch (e) {
+    return { ok: false, error: String(e.message || e), dir: wikiDir(), files: [], selected: [] }
+  }
+})
+
+// Trỏ wiki sang thư mục khác (thường là vault Obsidian có sẵn). Đổi thư mục thì
+// xoá lựa chọn cũ vì đường dẫn tương đối không còn ý nghĩa.
+ipcMain.handle('wiki:chooseFolder', async () => {
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Chọn thư mục wiki (markdown)',
+    properties: ['openDirectory'],
+  })
+  if (result.canceled || !result.filePaths?.[0]) return { ok: false }
+  const target = result.filePaths[0]
+  if (path.resolve(target) !== path.resolve(wikiDir())) {
+    store.set('wikiDir', target)
+    store.set('wikiFiles', [])
+  }
+  const all = scanWiki(target)
+  return { ok: true, dir: target, files: all, selected: [], autoLimit: WIKI_AUTO_LIMIT }
+})
+
+// Lưu danh sách file được dùng làm luật viết listing.
+ipcMain.handle('wiki:setSelection', (_event, files) => {
+  store.set('wikiFiles', Array.isArray(files) ? files : [])
+  return { ok: true }
+})
+
+ipcMain.handle('wiki:openFolder', async () => {
+  const dir = ensureWikiDir()
+  const err = await shell.openPath(dir)
+  return { ok: !err, dir, error: err || undefined }
+})
+
+// Viết listing cho MỘT ảnh đã chọn: wiki + bối cảnh concept + chính tấm ảnh.
+ipcMain.handle('listing:generate', async (_event, { imageId, context }) => {
+  try {
+    const apiKey = store.get('apiKey', '')
+    if (!apiKey) throw new Error('Chưa cấu hình API key. Vui lòng vào Cài đặt.')
+
+    const { text: wiki, files, bytes } = readWiki()
+    if (!wiki.trim()) {
+      throw new Error('Các file wiki được chọn đều rỗng. Vào Cài đặt để chọn lại.')
+    }
+
+    const b64 = fs.readFileSync(imagePath(imageId)).toString('base64')
+    const model = store.get('textModel', 'gpt-4.1')
+
+    const res = await fetchWithDuplex(`${endpointBase()}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: `${LISTING_SYSTEM}\n\n# WIKI\n${wiki}` },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `Bối cảnh của concept này (có thể lệch với ảnh — ưu tiên ảnh):\n` +
+                  `${(context || '').trim() || '(không có)'}\n\n` +
+                  `Hãy viết listing cho đúng sản phẩm trong ảnh.`,
+              },
+              {
+                type: 'image_url',
+                image_url: { url: `data:image/png;base64,${b64}`, detail: 'high' },
+              },
+            ],
+          },
+        ],
+      }),
+    })
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      throw new Error(`API ${res.status}: ${detail.slice(0, 300)}`)
+    }
+    const json = await res.json()
+    const text = json?.choices?.[0]?.message?.content
+    if (!text || !text.trim()) throw new Error('Phản hồi không chứa nội dung.')
+
+    return { ok: true, text: text.trim(), model, wikiFiles: files, wikiBytes: bytes }
+  } catch (e) {
+    console.error(e)
+    return { ok: false, error: String(e.message || e) }
+  }
+})
+
 // ---- Conversation (tab) management ----
 ipcMain.handle('conversations:list', () => ensureIndex())
 
@@ -745,6 +1025,47 @@ ipcMain.handle('image:save', async (_event, { id, defaultName }) => {
 
   fs.copyFileSync(imagePath(id), result.filePath)
   return { success: true, path: result.filePath }
+})
+
+// Xuất cả một bộ ảnh (vd 8 mockup) vào một thư mục con do người dùng chọn, đặt
+// tên file theo thứ tự + tên shot để mở ra là biết ảnh nào đi slot nào.
+function safeFileName(name, fallback) {
+  const cleaned = String(name || '')
+    .replace(/[\\/:*?"<>|]+/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60)
+  return cleaned || fallback
+}
+
+ipcMain.handle('images:saveAll', async (_event, { items, folderName }) => {
+  const list = Array.isArray(items) ? items.filter((it) => it && it.id) : []
+  if (list.length === 0) return { success: false }
+
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Chọn nơi lưu cả bộ ảnh',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (result.canceled || !result.filePaths?.[0]) return { success: false }
+
+  const target = path.join(result.filePaths[0], safeFileName(folderName, 'ChatDKH'))
+  fs.mkdirSync(target, { recursive: true })
+
+  let saved = 0
+  const failed = []
+  list.forEach((it, i) => {
+    const order = String(i + 1).padStart(2, '0')
+    const label = safeFileName(it.name, 'image')
+    try {
+      fs.copyFileSync(imagePath(it.id), path.join(target, `${order}-${label}.png`))
+      saved++
+    } catch {
+      failed.push(it.name || it.id)
+    }
+  })
+
+  return { success: true, path: target, saved, total: list.length, failed }
 })
 
 // ---- Image storage folder: inspect, open, and relocate ----

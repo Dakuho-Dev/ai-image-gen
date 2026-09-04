@@ -1328,3 +1328,79 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---- Wiki file picker (Cài đặt) ---- */
+.wiki-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.wiki-picker-links button {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.wiki-picker-links button:hover {
+  opacity: 1;
+}
+
+.wiki-picker {
+  margin-top: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius);
+  padding: 6px;
+}
+
+.wiki-file {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wiki-file:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.wiki-file-name {
+  /* Đường dẫn dài thì xuống dòng — cắt bớt sẽ giấu mất chính tên file. */
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.wiki-file-size {
+  flex-shrink: 0;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.wiki-filter {
+  margin-top: 6px;
+}
+
+.wiki-picker-links {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.wiki-warn {
+  color: #ffb4b4;
+}

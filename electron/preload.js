@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('image:generate:progress', listener)
   },
   saveImage: (payload) => ipcRenderer.invoke('image:save', payload),
+  saveImages: (payload) => ipcRenderer.invoke('images:saveAll', payload),
   readImage: (id) => ipcRenderer.invoke('image:read', id),
   getImagesFolder: () => ipcRenderer.invoke('images:getFolder'),
   openImagesFolder: () => ipcRenderer.invoke('images:openFolder'),
@@ -32,6 +33,14 @@ contextBridge.exposeInMainWorld('api', {
   fetchSheetPending: () => ipcRenderer.invoke('sheet:fetchPending'),
   markSheetDone: (payload) => ipcRenderer.invoke('sheet:markDone', payload),
   markSheetError: (payload) => ipcRenderer.invoke('sheet:markError', payload),
+  // Mockup set (1.3.0)
+  getMockupShots: () => ipcRenderer.invoke('mockup:getShots'),
+  // Listing writer (1.4.0)
+  getWikiInfo: () => ipcRenderer.invoke('wiki:info'),
+  chooseWikiFolder: () => ipcRenderer.invoke('wiki:chooseFolder'),
+  setWikiSelection: (files) => ipcRenderer.invoke('wiki:setSelection', files),
+  openWikiFolder: () => ipcRenderer.invoke('wiki:openFolder'),
+  generateListing: (payload) => ipcRenderer.invoke('listing:generate', payload),
   // Auto update
   getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
   checkForUpdate: () => ipcRenderer.invoke('update:check'),
