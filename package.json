@@ -1,7 +1,7 @@
 {
   "name": "ai-image-gen",
   "private": true,
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "ChatDKH - Ứng dụng trò chuyện AI với khả năng tạo hình ảnh từ mô tả văn bản, sử dụng AI của Dakuho.",
   "author": "Dakuho-Dev",
   "main": "dist-electron/main.js",
